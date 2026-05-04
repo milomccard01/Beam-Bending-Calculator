@@ -304,16 +304,14 @@ def influence_line(L, EI, n_il, support, x_target, response):
 #  STRUCTURAL CHECKS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_checks(L, max_M, max_V, max_d_mm, sp, P_axial, E, Fy):
+def run_checks(L, max_M, max_V, max_d_mm, sp, E, Fy):
     I = sp["I"]; A = sp["A"]; c = sp["c"]
     d = sp["d"]; tw = sp["tw"]; Iy = sp["Iy"]
     checks = []
 
     sig_b = abs(max_M)*c/I
-    sig_a = abs(P_axial)/A if A > 0 else 0.0
-    sig   = sig_b + sig_a
-    r1    = sig/Fy
-    checks.append({"name":"Bending + Axial Stress","demand":sig*1e-6,
+    r1    = sig_b/Fy
+    checks.append({"name":"Bending Stress","demand":sig_b*1e-6,
                    "cap":Fy*1e-6,"unit":"MPa","ratio":r1,
                    "status":"PASS" if r1<=1 else "FAIL"})
 
@@ -543,7 +541,7 @@ def plotly_animation(L, EI, support, pt_loads, dist_loads, n_elem=200, n_frames=
 #  PDF REPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
-def make_pdf(L, E, Fy, support, sec_type, sp, pt_loads, dist_loads, P_axial,
+def make_pdf(L, E, Fy, support, sec_type, sp, pt_loads, dist_loads,
              x, V, M, y_mm, reactions, checks, proj_name, U):
     buf = io.BytesIO()
     with PdfPages(buf) as pdf:
@@ -662,9 +660,6 @@ with st.sidebar:
     sec_lbl("LOADS")
     _, lF = dsp(1.0,"F",U); _, lw_lbl = dsp(1.0,"w",U)
 
-    P_ax_disp = st.number_input(f"Axial Load  ({lF})  [+ tension]", value=0.0)
-    P_axial   = to_si(P_ax_disp,"F",U)
-
     st.markdown("**Point Loads  ↓ positive**")
     n_pl = st.number_input("Count", 0, 8, 1, key="npl")
     pt_loads_raw = []
@@ -715,7 +710,7 @@ max_del = float(np.max(np.abs(y_mm)))
 x_del   = float(x[np.argmax(np.abs(y_mm))])
 max_M   = float(np.max(np.abs(M)))
 max_V   = float(np.max(np.abs(V)))
-checks  = run_checks(L, max_M, max_V, max_del, sp, P_axial, E, Fy)
+checks  = run_checks(L, max_M, max_V, max_del, sp, E, Fy)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN LAYOUT
@@ -742,11 +737,12 @@ for col,(name,val) in zip(rcols,reactions.items()):
 
 st.markdown("---")
 
-tab_res, tab_anim, tab_il, tab_chk, tab_rep = st.tabs([
+tab_res, tab_anim, tab_il, tab_chk, tab_col, tab_rep = st.tabs([
     "📊  Results",
     "🎬  Animated Deflection",
     "📈  Influence Lines",
     "✅  Checks",
+    "🏛️  Column Buckling",
     "📄  Report",
 ])
 
@@ -834,9 +830,6 @@ with tab_il:
 # ── TAB 4 ─────────────────────────────────────────────────────────────────────
 with tab_chk:
     st.markdown(f"**{mat_key}** — E = {E*1e-9:.0f} GPa · Fy = {Fy*1e-6:.0f} MPa")
-    if P_axial != 0:
-        sv,sl = dsp(abs(P_axial),"F",U)
-        st.markdown(f"Axial load: **{sv:.3f} {sl}** ({'tension +'  if P_axial>0 else 'compression −'})")
 
     has_fail = any(c["status"]=="FAIL" for c in checks)
     has_warn = any(c["status"]=="WARN" for c in checks)
@@ -862,7 +855,255 @@ with tab_chk:
                  "Status": c["status"]} for c in checks]
     st.dataframe(pd.DataFrame(fos_rows), use_container_width=True, hide_index=True)
 
-# ── TAB 5 ─────────────────────────────────────────────────────────────────────
+# ── TAB 5 — COLUMN BUCKLING ──────────────────────────────────────────────────
+with tab_col:
+    st.markdown(
+        "Analyse the member as a **column** under axial compression. "
+        "Inputs here are independent of the beam analysis — you can vary "
+        "column length, end conditions, and applied load freely."
+    )
+
+    # ── Column inputs ─────────────────────────────────────────────────────────
+    st.markdown("#### Column Parameters")
+    c1c, c2c, c3c = st.columns(3)
+
+    _, lLc = dsp(1.0,"L",U)
+    Lc_disp = c1c.number_input(f"Column Length  ({lLc})", 0.1, 1000.0,
+                                float(L_disp), 0.5, key="col_L")
+    Lc = to_si(Lc_disp,"L",U)
+
+    end_cond = c2c.selectbox("End Condition", [
+        "Pinned – Pinned   (K = 1.0)",
+        "Fixed – Free      (K = 2.0)",
+        "Fixed – Pinned    (K = 0.699)",
+        "Fixed – Fixed     (K = 0.5)",
+    ], key="col_end")
+    K_map = {
+        "Pinned – Pinned   (K = 1.0)":   1.0,
+        "Fixed – Free      (K = 2.0)":   2.0,
+        "Fixed – Pinned    (K = 0.699)":  0.699,
+        "Fixed – Fixed     (K = 0.5)":   0.5,
+    }
+    K = K_map[end_cond]
+
+    _, lFc = dsp(1.0,"F",U)
+    Papplied_disp = c3c.number_input(f"Applied Axial Load  ({lFc})  [compression +]",
+                                      0.0, value=0.0, key="col_P")
+    P_applied = to_si(Papplied_disp,"F",U)
+
+    # ── Derived column quantities ─────────────────────────────────────────────
+    A_col  = sp["A"]; I_col = sp["I"]; Iy_col = sp["Iy"]
+    I_min  = min(I_col, Iy_col)                       # buckles about weak axis
+    r_min  = np.sqrt(I_min / A_col) if A_col > 0 else 1e-9
+    Le_col = K * Lc                                    # effective length [m]
+    SR     = Le_col / r_min                            # slenderness ratio
+
+    # Euler critical load and stress
+    Pcr_euler = (np.pi**2 * E * I_min) / Le_col**2 if Le_col > 0 else 0.0
+    sig_cr_euler = Pcr_euler / A_col if A_col > 0 else 0.0
+
+    # Transition slenderness ratio Cc (Euler–Johnson boundary)
+    Cc = np.sqrt(2 * np.pi**2 * E / Fy) if Fy > 0 else 200.0
+
+    # Johnson parabolic formula (intermediate columns, SR < Cc)
+    if SR <= Cc:
+        sig_cr_johnson = Fy * (1.0 - SR**2 / (2 * Cc**2))
+        Pcr_johnson    = sig_cr_johnson * A_col
+        regime = "Johnson (intermediate)"
+    else:
+        sig_cr_johnson = sig_cr_euler
+        Pcr_johnson    = Pcr_euler
+        regime = "Euler (long column)"
+
+    sig_cr = sig_cr_johnson      # governing critical stress
+    Pcr    = Pcr_johnson
+
+    FOS_col = Pcr / P_applied if P_applied > 0 else float("inf")
+    col_status = "PASS" if (P_applied == 0 or FOS_col >= 1.0) else "FAIL"
+
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    st.markdown("#### Results")
+    m1,m2,m3,m4 = st.columns(4)
+
+    Pcr_d,  lPcr = dsp(Pcr,  "F", U)
+    scr_d,  lscr = dsp(sig_cr,"s", U)
+    Papp_d, lPa  = dsp(P_applied,"F",U)
+
+    m1.metric("Critical Load  Pcr",       f"{Pcr_d:.3f} {lPcr}")
+    m2.metric("Critical Stress  σcr",     f"{scr_d:.3f} {lscr}")
+    m3.metric("Slenderness Ratio  KL/r",  f"{SR:.1f}")
+    m4.metric("Factor of Safety",
+              f"{FOS_col:.2f}" if P_applied > 0 else "—",
+              delta="PASS" if col_status=="PASS" else "FAIL",
+              delta_color="normal" if col_status=="PASS" else "inverse")
+
+    # Status banner
+    if P_applied == 0:
+        st.info(f"ℹ️  No applied load entered. Regime: **{regime}** · Cc = {Cc:.1f}")
+    elif col_status == "PASS":
+        st.success(f"✅  Column is stable — FOS = {FOS_col:.2f}   [{regime}]")
+    else:
+        st.error(f"❌  Applied load exceeds Pcr — column will buckle!  [{regime}]")
+
+    st.markdown("---")
+
+    # ── Two-panel plot: buckled shape + column curve ──────────────────────────
+    col_left, col_right = st.columns([1,2])
+
+    with col_left:
+        st.markdown("**Buckled Shape**")
+        fig_bk, ax_bk = plt.subplots(figsize=(3, 5), facecolor=BG)
+        ax_bk.set_facecolor(CARD)
+        for spine in ax_bk.spines.values(): spine.set_color(GRID)
+        ax_bk.tick_params(colors="#888", labelsize=8)
+        ax_bk.set_xlim(-1.5, 1.5); ax_bk.set_ylim(-0.05*Lc, 1.05*Lc)
+        ax_bk.set_xlabel("δ  (normalized)", color="#888", fontsize=8)
+        ax_bk.set_ylabel(f"Height  ({lLc})", color="#888", fontsize=8)
+        ax_bk.set_xticks([]); ax_bk.yaxis.set_major_formatter(
+            matplotlib.ticker.FuncFormatter(lambda v,_: f"{v*dsp(1.0,'L',U)[0]:.1f}"))
+
+        # Buckled shape half-sine for the mode corresponding to end condition
+        y_col = np.linspace(0, Lc, 200)
+        # Mode shape: sin(π*y/Le) adjusted for pinned ends; for others approximate
+        # with mode reflecting the effective half-wavelength
+        if K == 2.0:   # fixed-free: quarter sine
+            delta = np.sin(np.pi*y_col / (2*Le_col))
+        elif K == 0.5: # fixed-fixed: full sine (2 half-waves)
+            delta = np.sin(2*np.pi*y_col / (Le_col))
+        else:           # pinned-pinned and fixed-pinned: half-sine
+            delta = np.sin(np.pi*y_col / Le_col)
+
+        # Draw undeflected centreline
+        ax_bk.plot([0,0],[0,Lc], color="#333", lw=1.5, ls="dashed")
+        # Buckled shape
+        ax_bk.plot(delta, y_col, color=ACC, lw=2.5, label="Buckled")
+        ax_bk.fill_betweenx(y_col, 0, delta, alpha=0.15, color=ACC)
+
+        # End condition symbols
+        def draw_pin(axx, y_pos, col_):
+            size = Lc*0.04
+            axx.add_patch(plt.Polygon([[0,y_pos],[-size,y_pos-1.5*size],[size,y_pos-1.5*size]],
+                facecolor="#3a4060", edgecolor=col_, lw=1.2))
+            axx.plot([-2*size,2*size],[y_pos-1.5*size,y_pos-1.5*size],color=col_,lw=1.5)
+
+        def draw_fixed(axx, y_pos, col_):
+            size = Lc*0.04
+            axx.add_patch(patches.Rectangle((-3*size, y_pos-size), 6*size, size,
+                facecolor="#1e2640", edgecolor=col_, lw=1.5))
+            for hx in np.linspace(-2*size, 2*size, 5):
+                sign = 1 if y_pos==0 else -1
+                axx.plot([hx, hx+0.5*size*sign],[y_pos-size, y_pos-1.5*size*sign],
+                         color="#444",lw=0.8)
+
+        end_labels = {
+            "Pinned – Pinned   (K = 1.0)":  ("pin","pin"),
+            "Fixed – Free      (K = 2.0)":  ("fixed","free"),
+            "Fixed – Pinned    (K = 0.699)": ("fixed","pin"),
+            "Fixed – Fixed     (K = 0.5)":  ("fixed","fixed"),
+        }
+        bot_end, top_end = end_labels[end_cond]
+
+        if bot_end == "pin":   draw_pin(ax_bk, 0, ACC)
+        else:                  draw_fixed(ax_bk, 0, ACC)
+        if top_end == "pin":   draw_pin(ax_bk, Lc, BLU)
+        elif top_end == "free":
+            ax_bk.plot([-0.1,0.1],[Lc,Lc], color=BLU, lw=1.5, ls="dashed")
+        else:                  draw_fixed(ax_bk, Lc, BLU)
+
+        # Applied load arrow
+        arr_x = 0.9
+        ax_bk.annotate("", xy=(arr_x, Lc), xytext=(arr_x, Lc+0.12*Lc),
+            arrowprops=dict(arrowstyle="-|>",color=RED,lw=1.5,mutation_scale=10))
+        if P_applied > 0:
+            Pad,lPad = dsp(P_applied,"F",U)
+            ax_bk.text(arr_x, Lc+0.14*Lc, f"{Pad:.2g}{lPad}", color=RED,
+                       fontsize=7, fontfamily="monospace", ha="center")
+
+        ax_bk.set_title(f"K = {K}", color="#aaa", fontsize=9, fontfamily="monospace")
+        ax_bk.text(-1.4, Lc*0.5, f"Le = {Le_col*dsp(1.0,'L',U)[0]:.2f} {lLc}",
+                   color="#666", fontsize=7.5, fontfamily="monospace", rotation=90, va="center")
+        fig_bk.tight_layout()
+        st.pyplot(fig_bk, use_container_width=True); plt.close(fig_bk)
+
+    with col_right:
+        st.markdown("**Column Curve  (σcr vs KL/r)**")
+
+        SR_arr = np.linspace(1, max(SR*1.6, Cc*1.4, 200), 500)
+        sig_johnson_arr = np.where(
+            SR_arr <= Cc,
+            Fy * (1 - SR_arr**2 / (2*Cc**2)),
+            np.pi**2 * E / SR_arr**2
+        )
+        sig_euler_arr = np.pi**2 * E / SR_arr**2
+
+        fig_cc = go.Figure()
+        fig_cc.add_trace(go.Scatter(x=SR_arr, y=sig_euler_arr*1e-6,
+            mode="lines", line=dict(color="#555",width=1.5,dash="dash"),
+            name="Euler (full range)"))
+        fig_cc.add_trace(go.Scatter(x=SR_arr, y=sig_johnson_arr*1e-6,
+            mode="lines", line=dict(color=ACC,width=2.5),
+            name="Johnson–Euler (governing)"))
+        fig_cc.add_hline(y=Fy*1e-6, line_color="#ffd166", line_dash="dot",
+                         annotation_text=f"Fy = {Fy*1e-6:.0f} MPa",
+                         annotation_font_color="#ffd166", annotation_position="bottom right")
+        fig_cc.add_vline(x=Cc, line_color="#74b9ff", line_dash="dot",
+                         annotation_text=f"Cc = {Cc:.1f}",
+                         annotation_font_color="#74b9ff")
+
+        # Plot current member as a dot
+        fig_cc.add_trace(go.Scatter(
+            x=[SR], y=[sig_cr*1e-6],
+            mode="markers",
+            marker=dict(color=RED if col_status=="FAIL" else ACC,
+                        size=12, symbol="circle", line=dict(color="white",width=1.5)),
+            name=f"This column  (KL/r = {SR:.1f})"
+        ))
+        if P_applied > 0:
+            sig_app = P_applied / A_col
+            fig_cc.add_hline(y=sig_app*1e-6, line_color=RED, line_dash="dot",
+                             annotation_text=f"σ_applied = {sig_app*1e-6:.1f} MPa",
+                             annotation_font_color=RED)
+
+        fig_cc.update_layout(
+            paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
+            font=dict(color="#888"),
+            xaxis=dict(title="Slenderness Ratio  KL/r", color="#888", gridcolor=GRID),
+            yaxis=dict(title="Critical Stress  σcr  (MPa)", color="#888", gridcolor=GRID),
+            legend=dict(bgcolor="#13151e", bordercolor=GRID, font=dict(size=10)),
+            height=380, margin=dict(l=60,r=20,t=20,b=50),
+        )
+        st.plotly_chart(fig_cc, use_container_width=True)
+
+    # ── Detailed results table ────────────────────────────────────────────────
+    st.markdown("#### Detailed Summary")
+    Pcrd,  lPcrd  = dsp(Pcr,  "F", U)
+    scrd,  lscrd  = dsp(sig_cr,"s", U)
+    syd,   lsyd   = dsp(Fy,    "s", U)
+    Led,   lLed   = dsp(Le_col,"L", U)
+    rmd,   lrmd   = dsp(r_min, "L", U)
+    Imin_d,lImin  = dsp(I_min, "I", U)
+
+    detail_rows = [
+        ("Effective Length Factor K",    f"{K}"),
+        ("Effective Length  Le = KL",    f"{Led:.3f} {lLed}"),
+        (f"Min. Radius of Gyration  r",  f"{r_min*1e3:.2f} mm"),
+        ("Slenderness Ratio  KL/r",      f"{SR:.2f}"),
+        ("Transition Slenderness  Cc",   f"{Cc:.2f}"),
+        ("Column Regime",                regime),
+        (f"Min. Moment of Inertia  I",   f"{Imin_d:.3f} {lImin}"),
+        ("Euler Critical Load  Pcr,E",   f"{dsp(Pcr_euler,'F',U)[0]:.3f} {lPcrd}"),
+        ("Governing Critical Load  Pcr", f"{Pcrd:.3f} {lPcrd}"),
+        ("Critical Stress  σcr",         f"{scrd:.3f} {lscrd}"),
+        ("Yield Stress  Fy",             f"{syd:.1f} {lsyd}"),
+        ("Applied Load  P",              f"{dsp(P_applied,'F',U)[0]:.3f} {lPcrd}" if P_applied>0 else "—"),
+        ("Factor of Safety",             f"{FOS_col:.3f}" if P_applied>0 else "—"),
+        ("Status",                       col_status),
+    ]
+    df_col = pd.DataFrame(detail_rows, columns=["Parameter","Value"])
+    st.dataframe(df_col, use_container_width=True, hide_index=True)
+
+
+# ── TAB 6 ─────────────────────────────────────────────────────────────────────
 with tab_rep:
     ca,cb = st.columns(2)
 
@@ -872,7 +1113,7 @@ with tab_rep:
         if st.button("Generate PDF Report"):
             with st.spinner("Building report…"):
                 pdf_buf = make_pdf(L,E,Fy,support,sec_type,sp,
-                                   pt_loads_raw,dist_loads_raw,P_axial,
+                                   pt_loads_raw,dist_loads_raw,
                                    x,V,M,y_mm,reactions,checks,proj_name,U)
             st.download_button("⬇️  Download PDF", data=pdf_buf,
                 file_name=f"{proj_name.replace(' ','_')}_report.pdf",
@@ -892,7 +1133,6 @@ with tab_rep:
                 "L_display":L_disp,
                 "sec_type": sec_type,
                 "sec_params":sec_params,
-                "P_axial_display": P_ax_disp,
                 "pt_loads_display": [[xp*fll2, P*fvv2] for xp,P in pt_loads_raw],
                 "dist_loads_display": [[x1*fll2,x2*fll2,w*fww2] for x1,x2,w in dist_loads_raw],
             }
