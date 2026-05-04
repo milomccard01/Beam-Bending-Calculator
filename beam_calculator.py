@@ -1,474 +1,919 @@
 """
-Beam Deflection Calculator
-Run with: streamlit run beam_calculator.py
+Advanced Beam Analysis Suite
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Features:
+  • 4 support types  (Simply Supported, Cantilever, Fixed-Fixed, Propped Cantilever)
+  • Standard W-shape library + custom sections (Rectangular, Circular, I-Beam)
+  • 4 material presets + custom
+  • SI / Imperial unit toggle
+  • Point loads, UDLs, axial loads
+  • FEM solver (Euler-Bernoulli, 300 elements)
+  • Interactive animated deflection (Plotly)
+  • Influence line tool
+  • Structural checks  (deflection limits, bending + axial stress, LTB warning, FOS)
+  • PDF report export
+  • Save / Load JSON configuration
+
+Run:    streamlit run beam_calculator.py
+Install: pip install streamlit numpy matplotlib pandas plotly
 """
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  IMPORTS
+# ══════════════════════════════════════════════════════════════════════════════
 import streamlit as st
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.backends.backend_pdf import PdfPages
+import pandas as pd
+import plotly.graph_objects as go
+import json, io
+from datetime import datetime
 
-# ── Page Config ──────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  PAGE CONFIG
+# ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="Beam Deflection Calculator",
+    page_title="Beam Analysis Suite",
     page_icon="🏗️",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
 
-    html, body, [class*="css"] {
-        font-family: 'IBM Plex Sans', sans-serif;
-    }
-    .main { background-color: #0d0f14; }
-    h1 { font-family: 'IBM Plex Mono', monospace !important; letter-spacing: -1px; }
-    .stMetric label { font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: #888 !important; }
-    .stMetric [data-testid="metric-container"] { 
-        background: #13151c; 
-        border: 1px solid #2a2d3a; 
-        border-radius: 6px; 
-        padding: 0.75rem 1rem;
-    }
-    .sidebar-section {
-        background: #13151c;
-        border-left: 3px solid #4ecca3;
-        padding: 0.5rem 0.75rem;
-        margin: 0.5rem 0;
-        border-radius: 0 4px 4px 0;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.75rem;
-        color: #4ecca3;
-    }
-    .stSelectbox label, .stNumberInput label { 
-        font-family: 'IBM Plex Mono', monospace; 
-        font-size: 0.75rem;
-        color: #aaa !important;
-    }
-    [data-testid="stSidebar"] { background: #0d0f14 !important; border-right: 1px solid #2a2d3a; }
-    .stButton>button {
-        background: #4ecca3 !important;
-        color: #0d0f14 !important;
-        font-family: 'IBM Plex Mono', monospace;
-        font-weight: 600;
-        border: none;
-        width: 100%;
-    }
+html, body, [class*="css"]          { font-family: 'IBM Plex Sans', sans-serif; }
+h1,h2,h3,h4                        { font-family: 'IBM Plex Mono', monospace !important; letter-spacing: -0.5px; }
+[data-testid="stSidebar"]           { background: #0b0d14 !important; border-right: 1px solid #1e2230; }
+.stMetric [data-testid="metric-container"] {
+    background: #13151e; border: 1px solid #252840;
+    border-radius: 6px; padding: 0.7rem 1rem;
+}
+.stMetric label                     { font-family: 'IBM Plex Mono', monospace !important; font-size: 0.7rem; color: #777 !important; }
+.stTabs [data-baseweb="tab-list"]   { gap: 4px; }
+.stTabs [data-baseweb="tab"]        { font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem; }
+.sec-label { font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; color: #4ecca3;
+    border-left: 3px solid #4ecca3; padding: 2px 0 2px 8px; margin: 10px 0 6px 0; }
+.pass-box  { background:#0f2e1f; color:#4ecca3; border:1px solid #1a5e3f;
+    border-radius:5px; padding:6px 12px; font-family:monospace; font-size:0.8rem; margin:3px 0; }
+.fail-box  { background:#2e0f0f; color:#ff6b6b; border:1px solid #5e1a1a;
+    border-radius:5px; padding:6px 12px; font-family:monospace; font-size:0.8rem; margin:3px 0; }
+.warn-box  { background:#2a2a0a; color:#ffd166; border:1px solid #5a5a0f;
+    border-radius:5px; padding:6px 12px; font-family:monospace; font-size:0.8rem; margin:3px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Solver ───────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  DATABASES
+# ══════════════════════════════════════════════════════════════════════════════
 
-def solve_beam(L, E, I, support, point_loads_t, dist_loads_t):
+W_SHAPES = {
+    "W100x19":  {"d":106,  "bf":103, "tf":8.8,  "tw":7.1},
+    "W150x22":  {"d":152,  "bf":152, "tf":6.6,  "tw":5.8},
+    "W150x37":  {"d":162,  "bf":154, "tf":11.6, "tw":8.1},
+    "W200x36":  {"d":201,  "bf":165, "tf":10.2, "tw":6.2},
+    "W200x52":  {"d":206,  "bf":204, "tf":12.6, "tw":7.9},
+    "W200x71":  {"d":216,  "bf":206, "tf":17.4, "tw":10.2},
+    "W250x49":  {"d":247,  "bf":202, "tf":11.0, "tw":7.4},
+    "W250x73":  {"d":253,  "bf":254, "tf":14.2, "tw":8.6},
+    "W250x89":  {"d":260,  "bf":256, "tf":17.3, "tw":10.7},
+    "W310x60":  {"d":303,  "bf":203, "tf":13.1, "tw":7.5},
+    "W310x79":  {"d":306,  "bf":254, "tf":14.6, "tw":8.8},
+    "W310x107": {"d":311,  "bf":306, "tf":17.0, "tw":10.9},
+    "W360x79":  {"d":354,  "bf":205, "tf":16.8, "tw":9.4},
+    "W360x110": {"d":360,  "bf":257, "tf":19.9, "tw":11.4},
+    "W360x162": {"d":368,  "bf":371, "tf":20.1, "tw":12.3},
+    "W410x85":  {"d":417,  "bf":181, "tf":18.2, "tw":10.9},
+    "W410x100": {"d":415,  "bf":260, "tf":16.9, "tw":10.0},
+    "W410x149": {"d":431,  "bf":265, "tf":25.0, "tw":14.9},
+    "W460x97":  {"d":466,  "bf":193, "tf":19.1, "tw":11.4},
+    "W460x144": {"d":472,  "bf":283, "tf":22.1, "tw":13.6},
+    "W530x101": {"d":537,  "bf":214, "tf":17.4, "tw":10.9},
+    "W530x138": {"d":549,  "bf":214, "tf":23.6, "tw":14.7},
+    "W610x101": {"d":603,  "bf":228, "tf":14.9, "tw":10.5},
+    "W610x155": {"d":611,  "bf":324, "tf":19.1, "tw":12.7},
+    "W760x161": {"d":758,  "bf":267, "tf":19.3, "tw":13.8},
+    "W840x210": {"d":855,  "bf":292, "tf":22.2, "tw":15.5},
+}
+
+MATERIALS = {
+    "Steel A36":         {"E_GPa": 200.0, "Fy_MPa": 250},
+    "Steel A572-Gr50":   {"E_GPa": 200.0, "Fy_MPa": 345},
+    "Aluminum 6061-T6":  {"E_GPa":  68.9, "Fy_MPa": 276},
+    "Aluminum 2024-T3":  {"E_GPa":  72.4, "Fy_MPa": 345},
+    "Custom":            {"E_GPa": 200.0, "Fy_MPa": 250},
+}
+
+UNITS = {
+    "SI  (kN, m, MPa)": {
+        "F":  ("kN",    1e-3),
+        "L":  ("m",     1.0),
+        "M":  ("kN·m",  1e-3),
+        "s":  ("MPa",   1e-6),
+        "d":  ("mm",    1e3),
+        "w":  ("kN/m",  1e-3),
+        "E":  ("GPa",   1e-9),
+        "I":  ("cm⁴",  1e8),
+        "A":  ("mm²",  1e6),
+    },
+    "Imperial  (kips, ft, ksi)": {
+        "F":  ("kips",   2.24809e-4),
+        "L":  ("ft",     3.28084),
+        "M":  ("kip·ft", 7.37562e-4),
+        "s":  ("ksi",    1.45038e-7),
+        "d":  ("in",     39.3701),
+        "w":  ("k/ft",   6.85218e-5),
+        "E":  ("Msi",    1.45038e-10),
+        "I":  ("in⁴",   2.40251e6),
+        "A":  ("in²",   1550.0),
+    },
+}
+
+def dsp(val_si, qty, U):
+    """Convert SI value to display units. Returns (value, label)."""
+    lbl, fac = U[qty]
+    return val_si * fac, lbl
+
+def to_si(val_d, qty, U):
+    _, fac = U[qty]
+    return val_d / fac
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SECTION PROPERTIES
+# ══════════════════════════════════════════════════════════════════════════════
+
+def section_props(sec_type, params):
+    """Returns dict: I, A, c, Iy [m], bf, tf, d, tw [m]"""
+    if sec_type == "W-Shape":
+        s  = W_SHAPES[params["name"]]
+        d  = s["d"]*1e-3;  bf = s["bf"]*1e-3
+        tf = s["tf"]*1e-3; tw = s["tw"]*1e-3
+    elif sec_type == "Rectangular":
+        b = params["b"]*1e-3; h = params["h"]*1e-3
+        I = b*h**3/12; A = b*h; c = h/2; Iy = h*b**3/12
+        return {"I":I,"A":A,"c":c,"Iy":Iy,"bf":b,"tf":b/4,"d":h,"tw":b/2}
+    elif sec_type == "Circular":
+        r = params["d"]*0.5e-3
+        I = np.pi*r**4/4; A = np.pi*r**2; c = r; Iy = I
+        return {"I":I,"A":A,"c":c,"Iy":Iy,"bf":2*r,"tf":r/4,"d":2*r,"tw":r/2}
+    else:  # Custom I-Beam
+        bf = params["bf"]*1e-3; tf = params["tf"]*1e-3
+        hw = params["hw"]*1e-3; tw = params["tw"]*1e-3
+        d  = hw + 2*tf
+
+    hw_m = d - 2*tf
+    I  = (bf*d**3 - (bf-tw)*hw_m**3) / 12
+    A  = 2*bf*tf + hw_m*tw
+    c  = d/2
+    Iy = 2*(tf*bf**3/12) + hw_m*tw**3/12
+    return {"I":I,"A":A,"c":c,"Iy":Iy,"bf":bf,"tf":tf,"d":d,"tw":tw}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  FEM SOLVER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def fem_solve(L, EI, n_elem, support, pt_loads, dist_loads):
     """
-    Numerically solves beam using method of integration.
-
-    Sign conventions (internal):
-      - Loads:      positive = downward
-      - Shear V:    positive = upward force on left face
-      - Moment M:   positive = sagging (tension at bottom)
-      - Deflection: y_up positive upward; y_down_mm positive downward (for display)
-
-    Returns:
-      x         [m]   position array
-      V         [kN]  shear force
-      M         [kNm] bending moment
-      y_mm      [mm]  deflection (positive = downward)
-      reactions dict of named reaction values (kN or kNm)
+    Euler-Bernoulli FEM beam solver.
+    v positive upward [m], M positive sagging [Nm], V positive upward-on-left-face [N]
+    Loads: positive = downward.
     """
-    N = 6000
-    x = np.linspace(0, L, N)
-    dx = x[1] - x[0]
-    EI = E * I
+    n_nodes = n_elem + 1
+    Le = L / n_elem
+    nd  = 2 * n_nodes
 
-    # Build distributed load array q(x)  [N/m, positive = downward]
-    q = np.zeros(N)
-    for (x1, x2, w) in dist_loads_t:
-        q[(x >= x1) & (x <= x2)] += w
+    k_e = EI/Le**3 * np.array([
+        [ 12,     6*Le,   -12,    6*Le  ],
+        [  6*Le,  4*Le**2, -6*Le,  2*Le**2],
+        [-12,    -6*Le,    12,   -6*Le  ],
+        [  6*Le,  2*Le**2, -6*Le,  4*Le**2],
+    ])
 
-    # Resultants
-    total_q  = np.trapezoid(q, x)
-    moment_q = np.trapezoid(q * x, x)  # moment about A
-    total_P  = sum(P for (_, P) in point_loads_t)
-    moment_P = sum(P * xp for (xp, P) in point_loads_t)
-    total_load = total_q + total_P
-    total_mom  = moment_q + moment_P
+    K = np.zeros((nd, nd))
+    for e in range(n_elem):
+        g = [2*e, 2*e+1, 2*e+2, 2*e+3]
+        for i in range(4):
+            for j in range(4):
+                K[g[i], g[j]] += k_e[i, j]
 
-    # ─ Simply Supported ─────────────────────────────────────────────────────
+    def H(xi, Le_):
+        return np.array([
+            1 - 3*xi**2 + 2*xi**3,
+            Le_ * xi * (1-xi)**2,
+            3*xi**2 - 2*xi**3,
+            Le_ * xi**2 * (xi-1),
+        ])
+
+    F = np.zeros(nd)
+    gp = np.array([-0.906180, -0.538469, 0.0, 0.538469, 0.906180])
+    gw = np.array([ 0.236927,  0.478629, 0.568889, 0.478629, 0.236927])
+
+    for (x1, x2, w) in dist_loads:
+        for e in range(n_elem):
+            xL = e*Le; xR = xL+Le
+            a = max(x1,xL); b = min(x2,xR)
+            if a >= b: continue
+            mid = (a+b)/2; half = (b-a)/2
+            g = [2*e, 2*e+1, 2*e+2, 2*e+3]
+            for gpi, gwi in zip(gp, gw):
+                xi = float(np.clip((mid + half*gpi - xL)/Le, 0, 1))
+                F[g] -= w * gwi * half * H(xi, Le)
+
+    for (xp, P) in pt_loads:
+        xp = float(np.clip(xp, 0, L))
+        e  = min(int(xp/Le), n_elem-1)
+        xi = float(np.clip((xp - e*Le)/Le, 0, 1))
+        g  = [2*e, 2*e+1, 2*e+2, 2*e+3]
+        F[g] -= P * H(xi, Le)
+
+    last_v  = 2*(n_nodes-1)
+    last_th = 2*(n_nodes-1)+1
+
+    bc = {
+        "Simply Supported":   [0, last_v],
+        "Cantilever":         [0, 1],
+        "Fixed-Fixed":        [0, 1, last_v, last_th],
+        "Propped Cantilever": [0, 1, last_v],
+    }
+    fixed = bc.get(support, [0, last_v])
+    free  = [i for i in range(nd) if i not in fixed]
+
+    try:
+        u_f = np.linalg.solve(K[np.ix_(free,free)], F[free])
+    except np.linalg.LinAlgError:
+        st.error("Singular stiffness matrix."); st.stop()
+
+    u = np.zeros(nd)
+    for i, d in enumerate(free): u[d] = u_f[i]
+
+    x_nodes = np.linspace(0, L, n_nodes)
+    v       = u[0::2]
+    theta   = u[1::2]
+
+    x_mid = (np.arange(n_elem) + 0.5) * Le
+    M_mid = np.zeros(n_elem)
+    V_mid = np.zeros(n_elem)
+
+    for e in range(n_elem):
+        g   = [2*e, 2*e+1, 2*e+2, 2*e+3]
+        u_e = u[g]
+        xi  = 0.5
+        d2N = np.array([-6+12*xi, Le*(-4+6*xi), 6-12*xi, Le*(6*xi-2)])
+        d3N = np.array([12.0, 6*Le, -12.0, 6*Le])
+        M_mid[e] = EI * np.dot(d2N, u_e) / Le**2
+        V_mid[e] = EI * np.dot(d3N, u_e) / Le**3
+
+    M = np.interp(x_nodes, x_mid, M_mid, left=M_mid[0],  right=M_mid[-1])
+    V = np.interp(x_nodes, x_mid, V_mid, left=V_mid[0],  right=V_mid[-1])
+
+    R = K @ u - F
+    react = {}
     if support == "Simply Supported":
-        if L == 0:
-            raise ValueError("Beam length cannot be zero.")
-        Rb = total_mom / L
-        Ra = total_load - Rb
-        reactions = {
-            "Ra ↑  (kN)": Ra / 1e3,
-            "Rb ↑  (kN)": Rb / 1e3,
-        }
+        react = {"Ra ↑": R[0], "Rb ↑": R[last_v]}
+    elif support == "Cantilever":
+        react = {"Ra ↑": R[0], "Ma": R[1]}
+    elif support == "Fixed-Fixed":
+        react = {"Ra ↑": R[0], "Ma": R[1], "Rb ↑": R[last_v], "Mb": R[last_th]}
+    elif support == "Propped Cantilever":
+        react = {"Ra ↑": R[0], "Ma": R[1], "Rb ↑": R[last_v]}
 
-        # Shear
-        V = np.zeros(N)
-        V[0] = Ra
-        for i in range(1, N):
-            V[i] = V[i - 1] - q[i - 1] * dx
-            for (xp, P) in point_loads_t:
-                if x[i - 1] < xp <= x[i]:
-                    V[i] -= P
+    return x_nodes, v, M, V, theta, react
 
-        # Moment
-        M = np.zeros(N)
-        for i in range(1, N):
-            M[i] = M[i - 1] + V[i - 1] * dx
+# ══════════════════════════════════════════════════════════════════════════════
+#  INFLUENCE LINES
+# ══════════════════════════════════════════════════════════════════════════════
 
-        # Double integrate M:  EI·y'' = M,  y(0)=0, y(L)=0
-        int1 = np.zeros(N)
-        for i in range(1, N):
-            int1[i] = int1[i - 1] + M[i - 1] * dx
-        int2 = np.zeros(N)
-        for i in range(1, N):
-            int2[i] = int2[i - 1] + int1[i - 1] * dx
+def influence_line(L, EI, n_il, support, x_target, response):
+    positions = np.linspace(0, L, n_il+1)
+    IL = np.zeros_like(positions)
+    for i, xp in enumerate(positions):
+        x, v, M, V, _, _ = fem_solve(L, EI, n_il, support, [(xp, 1.0)], [])
+        idx = int(np.argmin(np.abs(x - x_target)))
+        if response == "M":       IL[i] = M[idx]
+        elif response == "V":     IL[i] = V[idx]
+        else:                     IL[i] = -v[idx]*1e3
+    return positions, IL
 
-        C1 = -int2[-1] / L   # enforces y(L) = 0
-        C2 = 0.0              # enforces y(0) = 0
-        y_up = (int2 + C1 * x + C2) / EI  # m, positive upward
+# ══════════════════════════════════════════════════════════════════════════════
+#  STRUCTURAL CHECKS
+# ══════════════════════════════════════════════════════════════════════════════
 
-    # ─ Cantilever (Fixed at x=0) ─────────────────────────────────────────────
-    else:
-        Ra = total_load
-        Ma = total_mom   # reaction moment at fixed end (counterclockwise)
-        reactions = {
-            "Ra ↑  (kN)":  Ra / 1e3,
-            "Ma  (kNm)":   Ma / 1e3,
-        }
+def run_checks(L, max_M, max_V, max_d_mm, sp, P_axial, E, Fy):
+    I = sp["I"]; A = sp["A"]; c = sp["c"]
+    d = sp["d"]; tw = sp["tw"]; Iy = sp["Iy"]
+    checks = []
 
-        # Shear
-        V = np.zeros(N)
-        V[0] = Ra
-        for i in range(1, N):
-            V[i] = V[i - 1] - q[i - 1] * dx
-            for (xp, P) in point_loads_t:
-                if x[i - 1] < xp <= x[i]:
-                    V[i] -= P
+    sig_b = abs(max_M)*c/I
+    sig_a = abs(P_axial)/A if A > 0 else 0.0
+    sig   = sig_b + sig_a
+    r1    = sig/Fy
+    checks.append({"name":"Bending + Axial Stress","demand":sig*1e-6,
+                   "cap":Fy*1e-6,"unit":"MPa","ratio":r1,
+                   "status":"PASS" if r1<=1 else "FAIL"})
 
-        # Moment: M(0) = -Ma  (hogging at root)
-        M = np.zeros(N)
-        M[0] = -Ma
-        for i in range(1, N):
-            M[i] = M[i - 1] + V[i - 1] * dx
+    tau   = abs(max_V)/(d*tw) if (d>0 and tw>0) else abs(max_V)/A
+    tau_a = 0.6*Fy
+    r2    = tau/tau_a
+    checks.append({"name":"Shear Stress (web)","demand":tau*1e-6,
+                   "cap":tau_a*1e-6,"unit":"MPa","ratio":r2,
+                   "status":"PASS" if r2<=1 else "FAIL"})
 
-        # Double integrate M:  EI·y'' = M,  y(0)=0, y'(0)=0
-        int1 = np.zeros(N)
-        for i in range(1, N):
-            int1[i] = int1[i - 1] + M[i - 1] * dx
-        int2 = np.zeros(N)
-        for i in range(1, N):
-            int2[i] = int2[i - 1] + int1[i - 1] * dx
-        # C1=0 (from y'(0)=0), C2=0 (from y(0)=0)
-        y_up = int2 / EI  # m, positive upward
+    lim360 = L/360*1e3
+    r3 = max_d_mm/lim360 if lim360>0 else 0
+    checks.append({"name":"Deflection  L/360  (live)","demand":round(max_d_mm,3),
+                   "cap":round(lim360,3),"unit":"mm","ratio":r3,
+                   "status":"PASS" if r3<=1 else "FAIL"})
 
-    # Positive downward for display
-    y_mm = -y_up * 1000  # mm
+    lim240 = L/240*1e3
+    r4 = max_d_mm/lim240 if lim240>0 else 0
+    checks.append({"name":"Deflection  L/240  (total)","demand":round(max_d_mm,3),
+                   "cap":round(lim240,3),"unit":"mm","ratio":r4,
+                   "status":"PASS" if r4<=1 else "FAIL"})
 
-    return x, V / 1e3, M / 1e3, y_mm, reactions
+    ry  = np.sqrt(Iy/A) if A>0 else 0
+    Lp  = 1.76*ry*np.sqrt(E/Fy) if Fy>0 else 0
+    r5  = L/Lp if Lp>0 else 999
+    checks.append({"name":"LTB  (Lp unbraced limit)","demand":round(L,3),
+                   "cap":round(Lp,3),"unit":"m","ratio":r5,
+                   "status":"PASS" if r5<=1 else "WARN"})
 
+    return checks
 
-# ── Plotting ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  PLOTTING
+# ══════════════════════════════════════════════════════════════════════════════
 
-BG   = "#0d0f14"
-CARD = "#13151c"
-GRID = "#1e2130"
-ACC  = "#4ecca3"
-RED  = "#ff6b6b"
-ORG  = "#ffd166"
-BLU  = "#74b9ff"
+BG  = "#0b0d14"; CARD = "#13151e"; GRID = "#1e2230"
+ACC = "#4ecca3"; RED  = "#ff6b6b"; ORG  = "#ffd166"; BLU = "#74b9ff"
 
-def style_ax(ax, ylabel, color):
+def _style_ax(ax, ylabel, color):
     ax.set_facecolor(CARD)
-    for sp in ax.spines.values():
-        sp.set_color(GRID)
+    for sp in ax.spines.values(): sp.set_color(GRID)
     ax.tick_params(colors="#888", labelsize=8)
-    ax.yaxis.label.set_color(color)
-    ax.yaxis.label.set_family("monospace")
-    ax.xaxis.label.set_color("#888")
-    ax.xaxis.label.set_family("monospace")
-    ax.set_ylabel(ylabel, fontsize=9)
-    ax.set_xlabel("x  (m)", fontsize=8)
-    ax.grid(axis='y', color=GRID, lw=0.5, alpha=0.8)
-    ax.axhline(0, color="#444", lw=0.8)
+    ax.yaxis.label.set_color(color); ax.yaxis.label.set_family("monospace")
+    ax.xaxis.label.set_color("#888"); ax.xaxis.label.set_family("monospace")
+    ax.set_ylabel(ylabel, fontsize=9); ax.set_xlabel("x  (m)", fontsize=8)
+    ax.grid(axis="y", color=GRID, lw=0.5, alpha=0.9)
+    ax.axhline(0, color="#333", lw=0.8)
 
+def plot_results(x, V, M, y_mm, L, pt_loads, dist_loads, support, U):
+    fV, lV = dsp(1e3,"F",U); fM, lM = dsp(1e3,"M",U); fd, ld = dsp(1e-3,"d",U)
 
-def make_figure(x, V, M, y_mm, L, point_loads, dist_loads, support):
-    fig = plt.figure(figsize=(13, 11), facecolor=BG)
-    gs  = GridSpec(4, 1, figure=fig, hspace=0.55,
-                   top=0.96, bottom=0.06, left=0.09, right=0.97)
+    fig = plt.figure(figsize=(13, 12), facecolor=BG)
+    gs  = GridSpec(4, 1, figure=fig, hspace=0.6, top=0.96, bottom=0.05, left=0.1, right=0.97)
     axes = [fig.add_subplot(gs[i]) for i in range(4)]
 
-    # ── 0: Beam Diagram ──────────────────────────────────────────────────────
     ax = axes[0]
     ax.set_facecolor(CARD)
-    ax.set_xlim(-0.08 * L, 1.08 * L)
-    ax.set_ylim(-0.3, 2.0)
-    ax.set_yticks([])
+    ax.set_xlim(-0.08*L, 1.08*L); ax.set_ylim(-0.4, 2.1); ax.set_yticks([])
     ax.set_xlabel("x  (m)", fontsize=8, color="#888")
-    ax.set_title("Beam Diagram", color="#ccc", fontsize=10,
-                 fontfamily="monospace", pad=6)
-    for sp in ax.spines.values():
-        sp.set_color(GRID)
+    ax.set_title("Beam Diagram", color="#ccc", fontsize=10, fontfamily="monospace", pad=5)
+    for sp_ in ax.spines.values(): sp_.set_color(GRID)
     ax.tick_params(colors="#888", labelsize=8)
 
-    # Beam body
-    beam = patches.FancyBboxPatch(
-        (0, 0.42), L, 0.16,
-        boxstyle="round,pad=0.01",
-        linewidth=1, edgecolor="#555", facecolor="#2a3050"
-    )
-    ax.add_patch(beam)
+    ax.add_patch(patches.FancyBboxPatch((0,0.42), L, 0.16,
+        boxstyle="round,pad=0.005", lw=1, edgecolor="#444", facecolor="#1e2640"))
 
-    # Supports
-    if support == "Simply Supported":
+    if support in ("Simply Supported",):
         for xs in [0.0, L]:
-            tri = plt.Polygon(
-                [[xs - 0.06*L, 0.3], [xs + 0.06*L, 0.3], [xs, 0.42]],
-                closed=True, facecolor="#4a5070", edgecolor=ACC, lw=1.2, zorder=4
-            )
-            ax.add_patch(tri)
-            ax.plot([xs - 0.08*L, xs + 0.08*L], [0.28, 0.28],
-                    color=ACC, lw=1.5)
-        ax.text(0,  0.18, "A", ha='center', va='top', color=ACC,
-                fontsize=8, fontfamily="monospace")
-        ax.text(L,  0.18, "B", ha='center', va='top', color=ACC,
-                fontsize=8, fontfamily="monospace")
-    else:  # Cantilever
-        wall = patches.Rectangle(
-            (-0.12*L, 0.15), 0.10*L, 0.7,
-            linewidth=1, edgecolor="#555", facecolor="#2a3050"
-        )
-        ax.add_patch(wall)
-        # hatch lines
-        for hy in np.linspace(0.15, 0.85, 8):
-            ax.plot([-0.12*L, 0], [hy, hy + 0.07], color="#555", lw=0.8)
-        ax.plot([0, 0], [0.15, 0.85], color=ACC, lw=2.5)
-        ax.text(L + 0.03*L, 0.50, "Free end",
-                ha='left', va='center', color="#777",
-                fontsize=7, fontfamily="monospace")
+            ax.add_patch(plt.Polygon([[xs-0.05*L,0.3],[xs+0.05*L,0.3],[xs,0.42]],
+                facecolor="#3a4060", edgecolor=ACC, lw=1.2, zorder=4))
+            ax.plot([xs-0.07*L,xs+0.07*L],[0.28,0.28], color=ACC, lw=1.5)
 
-    # Point loads
-    for (xp, P) in point_loads:
-        ax.annotate(
-            "", xy=(xp, 0.60), xytext=(xp, 1.35),
-            arrowprops=dict(arrowstyle="-|>", color=RED, lw=1.8,
-                            mutation_scale=12)
-        )
-        ax.text(xp, 1.42, f"{P/1e3:.1f} kN",
-                ha='center', va='bottom', color=RED,
-                fontsize=8, fontfamily="monospace")
+    if support == "Propped Cantilever":
+        ax.add_patch(plt.Polygon([[L-0.05*L,0.3],[L+0.05*L,0.3],[L,0.42]],
+            facecolor="#3a4060", edgecolor=BLU, lw=1.2, zorder=4))
+        ax.plot([L-0.07*L,L+0.07*L],[0.28,0.28], color=BLU, lw=1.5)
 
-    # Distributed loads
+    if support in ("Cantilever","Fixed-Fixed","Propped Cantilever"):
+        ax.add_patch(patches.Rectangle((-0.10*L,0.20),0.09*L,0.60,
+            lw=1, edgecolor="#444", facecolor="#1e2640"))
+        for hy in np.linspace(0.22,0.76,7):
+            ax.plot([-0.10*L,0],[hy,hy+0.07], color="#444", lw=0.8)
+        ax.plot([0,0],[0.20,0.80], color=ACC, lw=2.5)
+
+    if support == "Fixed-Fixed":
+        ax.add_patch(patches.Rectangle((L,0.20),0.09*L,0.60,
+            lw=1, edgecolor="#444", facecolor="#1e2640"))
+        for hy in np.linspace(0.22,0.76,7):
+            ax.plot([L,L+0.08*L],[hy,hy+0.07], color="#444", lw=0.8)
+        ax.plot([L,L],[0.20,0.80], color=ACC, lw=2.5)
+
+    for (xp, P) in pt_loads:
+        ax.annotate("", xy=(xp,0.60), xytext=(xp,1.35),
+            arrowprops=dict(arrowstyle="-|>",color=RED,lw=1.8,mutation_scale=12))
+        ax.text(xp, 1.42, f"{P*fV:.2g}{lV}", ha="center", va="bottom",
+                color=RED, fontsize=8, fontfamily="monospace")
+
     for (x1, x2, w) in dist_loads:
-        xs_arr = np.linspace(x1, x2, max(int((x2-x1)/L*20)+2, 5))
-        for xi in xs_arr:
-            ax.annotate(
-                "", xy=(xi, 0.60), xytext=(xi, 1.10),
-                arrowprops=dict(arrowstyle="-|>", color=ORG, lw=1.2,
-                                mutation_scale=8, alpha=0.85)
-            )
-        ax.plot([x1, x2], [1.12, 1.12], color=ORG, lw=2)
-        ax.text((x1+x2)/2, 1.20, f"{w/1e3:.1f} kN/m",
-                ha='center', va='bottom', color=ORG,
-                fontsize=8, fontfamily="monospace")
+        xs = np.linspace(x1, x2, max(int((x2-x1)/L*18)+2, 4))
+        for xi in xs:
+            ax.annotate("", xy=(xi,0.60), xytext=(xi,1.08),
+                arrowprops=dict(arrowstyle="-|>",color=ORG,lw=1.0,mutation_scale=7,alpha=0.8))
+        ax.plot([x1,x2],[1.10,1.10], color=ORG, lw=2)
+        ax.text((x1+x2)/2, 1.17, f"{w*fV/1:.2g}{lV}/m", ha="center",
+                va="bottom", color=ORG, fontsize=8, fontfamily="monospace")
 
-    # Dim line
-    ax.annotate("", xy=(L, 0.0), xytext=(0, 0.0),
-                arrowprops=dict(arrowstyle="<->", color="#555", lw=1))
-    ax.text(L/2, -0.08, f"L = {L:.1f} m",
-            ha='center', va='top', color="#555",
-            fontsize=8, fontfamily="monospace")
+    ax.annotate("", xy=(L,0.0), xytext=(0,0.0),
+        arrowprops=dict(arrowstyle="<->",color="#555",lw=1))
+    ax.text(L/2,-0.15,f"L = {L:.2f} m",ha="center",color="#555",
+            fontsize=8,fontfamily="monospace")
 
-    # ── 1: Shear Force ───────────────────────────────────────────────────────
-    ax = axes[1]
-    style_ax(ax, "V  (kN)", BLU)
-    ax.plot(x, V, color=BLU, lw=1.8, zorder=3)
-    ax.fill_between(x, V, 0, where=(V >= 0), alpha=0.20, color=BLU)
-    ax.fill_between(x, V, 0, where=(V <  0), alpha=0.20, color=RED)
-    ax.set_xlim(0, L)
-    idx = np.argmax(np.abs(V))
-    ax.plot(x[idx], V[idx], 'o', color=BLU, ms=5, zorder=4)
-    ax.annotate(f" {V[idx]:.2f}", xy=(x[idx], V[idx]),
-                color=BLU, fontsize=8, fontfamily="monospace",
-                va='bottom' if V[idx] >= 0 else 'top')
+    for data_arr, color, label, ax_i in [
+        (V*fV, BLU, f"V  ({lV})", 1),
+        (M*fM, ORG, f"M  ({lM})", 2),
+    ]:
+        ax2 = axes[ax_i]
+        _style_ax(ax2, label, color)
+        ax2.plot(x, data_arr, color=color, lw=1.8, zorder=3)
+        ax2.fill_between(x, data_arr, 0, where=(data_arr>=0), alpha=0.18, color=color)
+        ax2.fill_between(x, data_arr, 0, where=(data_arr< 0), alpha=0.18, color=RED)
+        ax2.set_xlim(0,L)
+        idx = int(np.argmax(np.abs(data_arr)))
+        ax2.plot(x[idx], data_arr[idx], "o", color=color, ms=5, zorder=4)
+        ax2.annotate(f" {data_arr[idx]:.3g}", xy=(x[idx],data_arr[idx]),
+                     color=color, fontsize=8, fontfamily="monospace",
+                     va="bottom" if data_arr[idx]>=0 else "top")
 
-    # ── 2: Bending Moment ────────────────────────────────────────────────────
-    ax = axes[2]
-    style_ax(ax, "M  (kNm)", ORG)
-    ax.plot(x, M, color=ORG, lw=1.8, zorder=3)
-    ax.fill_between(x, M, 0, where=(M >= 0), alpha=0.20, color=ORG)
-    ax.fill_between(x, M, 0, where=(M <  0), alpha=0.20, color=RED)
-    ax.set_xlim(0, L)
-    idx = np.argmax(np.abs(M))
-    ax.plot(x[idx], M[idx], 'o', color=ORG, ms=5, zorder=4)
-    ax.annotate(f" {M[idx]:.2f}", xy=(x[idx], M[idx]),
-                color=ORG, fontsize=8, fontfamily="monospace",
-                va='bottom' if M[idx] >= 0 else 'top')
-
-    # ── 3: Deflection ────────────────────────────────────────────────────────
-    ax = axes[3]
-    style_ax(ax, "δ  (mm ↓)", ACC)
-    ax.plot(x, y_mm, color=ACC, lw=1.8, zorder=3)
-    ax.fill_between(x, y_mm, 0, alpha=0.18, color=ACC)
-    ax.set_xlim(0, L)
-    ax.invert_yaxis()   # positive downward on screen
-    idx = np.argmax(np.abs(y_mm))
-    ax.plot(x[idx], y_mm[idx], 'o', color=ACC, ms=5, zorder=4)
-    ax.annotate(f" {abs(y_mm[idx]):.3f} mm", xy=(x[idx], y_mm[idx]),
-                color=ACC, fontsize=8, fontfamily="monospace",
-                va='top' if y_mm[idx] >= 0 else 'bottom')
+    yd = y_mm * fd
+    ax3 = axes[3]
+    _style_ax(ax3, f"δ  ({ld} ↓)", ACC)
+    ax3.plot(x, yd, color=ACC, lw=1.8, zorder=3)
+    ax3.fill_between(x, yd, 0, alpha=0.18, color=ACC)
+    ax3.set_xlim(0,L); ax3.invert_yaxis()
+    idx = int(np.argmax(np.abs(yd)))
+    ax3.plot(x[idx], yd[idx], "o", color=ACC, ms=5, zorder=4)
+    ax3.annotate(f" {abs(yd[idx]):.3g} {ld}", xy=(x[idx],yd[idx]),
+                 color=ACC, fontsize=8, fontfamily="monospace",
+                 va="top" if yd[idx]>=0 else "bottom")
 
     return fig
 
+def plot_section(sec_type, sp):
+    fig, ax = plt.subplots(figsize=(3.5,3.5), facecolor=CARD)
+    ax.set_facecolor(CARD); ax.set_aspect("equal"); ax.axis("off")
+    ax.set_title("Cross-Section", color="#aaa", fontsize=9, fontfamily="monospace")
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 🏗️ Beam Setup")
-
-    st.markdown('<div class="sidebar-section">BEAM PROPERTIES</div>',
-                unsafe_allow_html=True)
-    L      = st.number_input("Length  (m)",          0.5,  200.0,  5.0,  0.5)
-    E_GPa  = st.number_input("Young's Modulus  (GPa)", 1.0, 500.0, 200.0, 10.0)
-    E = E_GPa * 1e9
-
-    cs = st.selectbox("Cross Section", ["Rectangular", "Circular", "I-Beam"])
-    if cs == "Rectangular":
-        b_mm = st.number_input("Width  b  (mm)",  1.0, 5000.0,  100.0)
-        h_mm = st.number_input("Height h  (mm)", 1.0, 5000.0,  200.0)
-        b_m, h_m = b_mm*1e-3, h_mm*1e-3
-        I      = b_m * h_m**3 / 12
-        c_dist = h_m / 2
-    elif cs == "Circular":
-        d_mm = st.number_input("Diameter  (mm)", 1.0, 5000.0, 100.0)
-        d_m  = d_mm * 1e-3
-        I      = np.pi * d_m**4 / 64
-        c_dist = d_m / 2
+    if sec_type == "Rectangular":
+        b = sp["bf"]*1e3; h = sp["d"]*1e3
+        ax.add_patch(patches.Rectangle((-b/2,-h/2),b,h,facecolor="#2a3a5a",edgecolor=BLU,lw=1.5))
+        ax.set_xlim(-b*0.8,b*0.8); ax.set_ylim(-h*0.8,h*0.8)
+    elif sec_type == "Circular":
+        r = sp["d"]*500
+        ax.add_patch(plt.Circle((0,0),r,facecolor="#2a3a5a",edgecolor=BLU,lw=1.5))
+        ax.set_xlim(-r*1.4,r*1.4); ax.set_ylim(-r*1.4,r*1.4)
     else:
-        bf = st.number_input("Flange Width  bf  (mm)", 1.0, 2000.0, 150.0) * 1e-3
-        tf = st.number_input("Flange Thick  tf  (mm)", 1.0,  500.0,  10.0) * 1e-3
-        hw = st.number_input("Web Height    hw  (mm)", 1.0, 2000.0, 200.0) * 1e-3
-        tw = st.number_input("Web Thick     tw  (mm)", 1.0,  500.0,   8.0) * 1e-3
-        H      = hw + 2*tf
-        I      = (bf * H**3 - (bf - tw) * hw**3) / 12
-        c_dist = H / 2
+        bf = sp["bf"]*1e3; tf = sp["tf"]*1e3
+        d  = sp["d"]*1e3;  tw = sp["tw"]*1e3
+        hw = d-2*tf
+        ax.add_patch(patches.Rectangle((-bf/2,hw/2),  bf, tf, facecolor="#2a3a5a",edgecolor=BLU,lw=1.2))
+        ax.add_patch(patches.Rectangle((-bf/2,-hw/2-tf),bf,tf,facecolor="#2a3a5a",edgecolor=BLU,lw=1.2))
+        ax.add_patch(patches.Rectangle((-tw/2,-hw/2), tw, hw, facecolor="#2a3a5a",edgecolor=BLU,lw=1.2))
+        mx = max(bf,d)/2*1.3
+        ax.set_xlim(-mx,mx); ax.set_ylim(-d/2*1.3,d/2*1.3)
 
-    I_cm4 = I * 1e8  # m^4 → cm^4
-    st.info(f"**I = {I_cm4:.3f} cm⁴**")
+    ax.plot(0,0,"+",color=ACC,ms=10,mew=1.5)
+    ax.text(0.02*sp["bf"]*1e3,0,"  NA",color=ACC,fontsize=7,fontfamily="monospace")
+    return fig
 
-    st.markdown('<div class="sidebar-section">SUPPORT TYPE</div>',
-                unsafe_allow_html=True)
-    support = st.selectbox(
-        "Boundary Conditions",
-        ["Simply Supported", "Cantilever (Fixed at Left)"]
+# ══════════════════════════════════════════════════════════════════════════════
+#  PLOTLY ANIMATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def plotly_animation(L, EI, support, pt_loads, dist_loads, n_elem=200, n_frames=25):
+    alphas = np.linspace(0, 1, n_frames)
+    frames_xy = []
+    for alpha in alphas:
+        pl = [(xp, P*alpha) for xp,P in pt_loads]
+        dl = [(x1,x2,w*alpha) for x1,x2,w in dist_loads]
+        xn, vn, _, _, _, _ = fem_solve(L, EI, n_elem, support, pl, dl)
+        frames_xy.append((xn.tolist(), (-vn*1e3).tolist()))
+
+    x0, y0 = frames_xy[0]
+
+    frames = [
+        go.Frame(data=[
+            go.Scatter(x=fd[0], y=fd[1], mode="lines",
+                       line=dict(color="#4ecca3", width=3)),
+            go.Scatter(x=fd[0], y=[0]*len(fd[0]), mode="lines",
+                       line=dict(color="#2a2a3a", width=1, dash="dot")),
+        ], name=str(i))
+        for i, fd in enumerate(frames_xy)
+    ]
+
+    fig = go.Figure(
+        data=[
+            go.Scatter(x=x0,y=y0,mode="lines",line=dict(color="#4ecca3",width=3),name="Deflected"),
+            go.Scatter(x=x0,y=[0]*len(x0),mode="lines",line=dict(color="#2a2a3a",width=1,dash="dot"),name="Original"),
+        ],
+        frames=frames,
+        layout=go.Layout(
+            title=dict(text="Beam Deflection Animation",font=dict(family="monospace",size=13,color="#ccc")),
+            paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
+            font=dict(color="#888"),
+            xaxis=dict(title="x (m)",color="#888",gridcolor="#1e2230",range=[-0.02*L,1.02*L]),
+            yaxis=dict(title="Deflection (mm ↓)",color="#888",gridcolor="#1e2230",autorange="reversed"),
+            margin=dict(l=60,r=20,t=55,b=60), height=400,
+            updatemenus=[dict(
+                type="buttons", showactive=False, y=1.08, x=0.5, xanchor="center",
+                buttons=[
+                    dict(label="▶  Play", method="animate",
+                         args=[None,dict(frame=dict(duration=55,redraw=True),fromcurrent=True,mode="immediate")]),
+                    dict(label="⏹  Stop", method="animate",
+                         args=[[None],dict(frame=dict(duration=0),mode="immediate")]),
+                ],
+            )],
+            sliders=[dict(
+                steps=[dict(method="animate",args=[[str(i)],dict(frame=dict(duration=0),mode="immediate")],
+                            label=f"{int(a*100)}%") for i,a in enumerate(alphas)],
+                x=0.05, len=0.9, y=-0.08,
+                currentvalue=dict(prefix="Load factor: ",suffix="%",font=dict(color="#888")),
+            )],
+        )
     )
+    return fig
 
-    st.markdown('<div class="sidebar-section">POINT LOADS  ↓ +</div>',
-                unsafe_allow_html=True)
-    n_pl = st.number_input("Number of point loads", 0, 5, 1, key="npl")
-    point_loads = []
+# ══════════════════════════════════════════════════════════════════════════════
+#  PDF REPORT
+# ══════════════════════════════════════════════════════════════════════════════
+
+def make_pdf(L, E, Fy, support, sec_type, sp, pt_loads, dist_loads, P_axial,
+             x, V, M, y_mm, reactions, checks, proj_name, U):
+    buf = io.BytesIO()
+    with PdfPages(buf) as pdf:
+        # Page 1 — Summary
+        fig = plt.figure(figsize=(11,8.5),facecolor="white")
+        ax_p = fig.add_axes([0,0,1,1]); ax_p.axis("off")
+        ax_p.set_facecolor("white")
+
+        fig.text(0.07,0.94,"BEAM ANALYSIS REPORT",fontsize=17,fontfamily="monospace",
+                 fontweight="bold",color="#0d0f14")
+        fig.text(0.07,0.90,proj_name,fontsize=11,color="#444")
+        fig.text(0.07,0.87,datetime.now().strftime("%B %d, %Y  %H:%M"),fontsize=9,color="#999")
+
+        rows = [
+            ("Support Condition", support),
+            ("Beam Length",       f"{L:.3f} m"),
+            ("Young's Modulus",   f"{E*1e-9:.1f} GPa"),
+            ("Yield Strength",    f"{Fy*1e-6:.0f} MPa"),
+            ("Section Type",      sec_type),
+            ("Mom. of Inertia",   f"{sp['I']*1e8:.3f} cm⁴"),
+            ("Cross-Sect. Area",  f"{sp['A']*1e6:.0f} mm²"),
+            ("Depth d",           f"{sp['d']*1e3:.1f} mm"),
+        ]
+        for j,(k,v) in enumerate(rows):
+            fig.text(0.07,0.80-j*0.043,k,fontsize=9,fontfamily="monospace",color="#666")
+            fig.text(0.32,0.80-j*0.043,v,fontsize=9,fontfamily="monospace",color="#111")
+
+        fig.text(0.55,0.94,"REACTIONS",fontsize=10,fontfamily="monospace",fontweight="bold")
+        for j,(name,val) in enumerate(reactions.items()):
+            fig.text(0.55,0.90-j*0.043,name,fontsize=9,fontfamily="monospace",color="#666")
+            fig.text(0.75,0.90-j*0.043,f"{val*1e-3:.4f} kN (or kNm)",fontsize=9,fontfamily="monospace")
+
+        fig.text(0.07,0.43,"STRUCTURAL CHECKS",fontsize=10,fontfamily="monospace",fontweight="bold")
+        cols = ["Check","Demand","Capacity","Ratio","Status"]
+        col_x = [0.07,0.37,0.53,0.66,0.76]
+        for ci,col in enumerate(cols):
+            fig.text(col_x[ci],0.39,col,fontsize=8,fontfamily="monospace",fontweight="bold",color="#555")
+        for j,ch in enumerate(checks):
+            yp = 0.35-j*0.038
+            clr = "#1a7a4a" if ch["status"]=="PASS" else ("#b07a00" if ch["status"]=="WARN" else "#aa2222")
+            fig.text(col_x[0],yp,ch["name"],fontsize=7.5,fontfamily="monospace")
+            fig.text(col_x[1],yp,f"{ch['demand']:.3g} {ch['unit']}",fontsize=7.5)
+            fig.text(col_x[2],yp,f"{ch['cap']:.3g} {ch['unit']}",fontsize=7.5)
+            fig.text(col_x[3],yp,f"{ch['ratio']:.3f}",fontsize=7.5)
+            fig.text(col_x[4],yp,ch["status"],fontsize=7.5,fontfamily="monospace",
+                     color=clr,fontweight="bold")
+
+        pdf.savefig(fig,dpi=150); plt.close(fig)
+
+        # Page 2 — Diagrams
+        fig2 = plot_results(x, V, M, y_mm, L, pt_loads, dist_loads, support, U)
+        fig2.set_facecolor("white")
+        for ax2 in fig2.axes:
+            ax2.set_facecolor("#f8f9fc")
+            for sp2 in ax2.spines.values(): sp2.set_color("#ddd")
+        pdf.savefig(fig2,dpi=150); plt.close(fig2)
+
+    buf.seek(0)
+    return buf
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
+
+def sec_lbl(txt):
+    st.sidebar.markdown(f'<div class="sec-label">{txt}</div>', unsafe_allow_html=True)
+
+with st.sidebar:
+    st.markdown("## 🏗️ Beam Analysis Suite")
+
+    sec_lbl("UNITS")
+    unit_key = st.selectbox("", list(UNITS.keys()), key="units_sel")
+    U = UNITS[unit_key]
+
+    sec_lbl("PROJECT")
+    proj_name = st.text_input("Project / Beam ID", value="Beam-01")
+
+    sec_lbl("MATERIAL")
+    mat_key = st.selectbox("Material", list(MATERIALS.keys()))
+    mat = dict(MATERIALS[mat_key])
+    if mat_key == "Custom":
+        mat["E_GPa"]  = st.number_input("E (GPa)",  1.0,1000.0,200.0)
+        mat["Fy_MPa"] = st.number_input("Fy (MPa)", 1.0,2000.0,250.0)
+    E  = mat["E_GPa"]  * 1e9
+    Fy = mat["Fy_MPa"] * 1e6
+
+    sec_lbl("BEAM GEOMETRY")
+    support = st.selectbox("Support Condition",
+        ["Simply Supported","Cantilever","Fixed-Fixed","Propped Cantilever"])
+    _, lL = dsp(1.0,"L",U)
+    L_disp = st.number_input(f"Length  ({lL})", 0.5, 1000.0, 5.0, 0.5)
+    L = to_si(L_disp,"L",U)
+
+    sec_lbl("CROSS-SECTION")
+    sec_type = st.selectbox("Section Type", ["W-Shape","Rectangular","Circular","Custom I-Beam"])
+    sec_params = {}
+    if sec_type == "W-Shape":
+        sec_params["name"] = st.selectbox("W-Shape", list(W_SHAPES.keys()), index=4)
+        s = W_SHAPES[sec_params["name"]]
+        st.caption(f'd={s["d"]}  bf={s["bf"]}  tf={s["tf"]}  tw={s["tw"]}  [mm]')
+    elif sec_type == "Rectangular":
+        sec_params["b"] = st.number_input("Width b (mm)", 1.0,5000.0,100.0)
+        sec_params["h"] = st.number_input("Height h (mm)",1.0,5000.0,200.0)
+    elif sec_type == "Circular":
+        sec_params["d"] = st.number_input("Diameter (mm)",1.0,5000.0,100.0)
+    else:
+        sec_params["bf"] = st.number_input("Flange Width bf (mm)",1.0,2000.0,150.0)
+        sec_params["tf"] = st.number_input("Flange Thick  tf (mm)",1.0,500.0,10.0)
+        sec_params["hw"] = st.number_input("Web Height    hw (mm)",1.0,2000.0,200.0)
+        sec_params["tw"] = st.number_input("Web Thick     tw (mm)",1.0,500.0,8.0)
+
+    sp   = section_props(sec_type, sec_params)
+    Iv, lI = dsp(sp["I"],"I",U); Av, lA = dsp(sp["A"],"A",U)
+    st.info(f"I = {Iv:.3f} {lI}   ·   A = {Av:.2f} {lA}")
+
+    sec_lbl("LOADS")
+    _, lF = dsp(1.0,"F",U); _, lw_lbl = dsp(1.0,"w",U)
+
+    P_ax_disp = st.number_input(f"Axial Load  ({lF})  [+ tension]", value=0.0)
+    P_axial   = to_si(P_ax_disp,"F",U)
+
+    st.markdown("**Point Loads  ↓ positive**")
+    n_pl = st.number_input("Count", 0, 8, 1, key="npl")
+    pt_loads_raw = []
     for i in range(int(n_pl)):
-        c1, c2 = st.columns(2)
-        xp   = c1.number_input("x (m)", 0.0, float(L), float(L/2), key=f"xp{i}")
-        P_kN = c2.number_input("P (kN)", value=10.0, key=f"P{i}")
-        if i == 0:
-            c1.caption("Position")
-            c2.caption("Magnitude")
-        point_loads.append((float(xp), float(P_kN * 1e3)))
+        c1,c2 = st.columns(2)
+        xp = c1.number_input(f"x ({lL})",0.0,float(L_disp),float(L_disp/2),key=f"xp{i}")
+        P  = c2.number_input(f"P ({lF})",value=10.0,key=f"P{i}")
+        if i==0: c1.caption("Position"); c2.caption("Load")
+        pt_loads_raw.append((to_si(xp,"L",U), to_si(P,"F",U)))
 
-    st.markdown('<div class="sidebar-section">DISTRIBUTED LOADS  ↓ +</div>',
-                unsafe_allow_html=True)
-    n_dl = st.number_input("Number of UDLs", 0, 3, 0, key="ndl")
-    dist_loads = []
+    st.markdown("**Distributed Loads  ↓ positive**")
+    n_dl = st.number_input("Count",0,4,0,key="ndl")
+    dist_loads_raw = []
     for i in range(int(n_dl)):
-        ca, cb = st.columns(2)
-        x1   = ca.number_input("x start (m)", 0.0, float(L), 0.0,       key=f"x1{i}")
-        x2   = cb.number_input("x end   (m)", 0.0, float(L), float(L),  key=f"x2{i}")
-        w_kN = st.number_input("Intensity (kN/m)", value=5.0, key=f"w{i}")
-        dist_loads.append((float(x1), float(x2), float(w_kN * 1e3)))
+        ca,cb = st.columns(2)
+        x1 = ca.number_input(f"Start ({lL})",0.0,float(L_disp),0.0,key=f"x1{i}")
+        x2 = cb.number_input(f"End   ({lL})",0.0,float(L_disp),float(L_disp),key=f"x2{i}")
+        w  = st.number_input(f"w ({lw_lbl})",value=5.0,key=f"w{i}")
+        dist_loads_raw.append((to_si(x1,"L",U),to_si(x2,"L",U),to_si(w,"w",U)))
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SOLVE
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Main Panel ────────────────────────────────────────────────────────────────
-st.markdown("# Beam Deflection Calculator")
-st.caption("Simply Supported & Cantilever  ·  Point & Distributed Loads  ·  SFD / BMD / Deflection")
+EI = E * sp["I"]
 
-if not point_loads and not dist_loads:
-    st.info("👈  Add loads in the sidebar to see results.")
+if not pt_loads_raw and not dist_loads_raw:
+    st.title("🏗️ Beam Analysis Suite")
+    st.info("👈  Configure the beam and add loads in the sidebar to begin.")
     st.stop()
 
-# Validate
-error_msg = None
-if len(dist_loads) > 0:
-    for (x1, x2, w) in dist_loads:
-        if x1 >= x2:
-            error_msg = f"Distributed load: start ({x1} m) must be less than end ({x2} m)."
+for (x1,x2,w) in dist_loads_raw:
+    if x1 >= x2:
+        st.error(f"Distributed load start ({x1:.2f}) must be less than end ({x2:.2f})."); st.stop()
 
-if error_msg:
-    st.error(error_msg)
-    st.stop()
+@st.cache_data(show_spinner="Solving…")
+def cached_solve(L, EI, support, pt, dl):
+    return fem_solve(L, EI, 300, support, pt, dl)
 
-# Solve
-try:
-    x_arr, V_arr, M_arr, y_arr, reactions = solve_beam(
-        float(L), float(E), float(I),
-        support,
-        tuple(point_loads),
-        tuple(dist_loads),
-    )
-except Exception as e:
-    st.error(f"Solver error: {e}")
-    st.stop()
+x, v, M, V, theta, reactions = cached_solve(
+    L, EI, support,
+    tuple(pt_loads_raw),
+    tuple(dist_loads_raw),
+)
 
-# ── Summary Metrics ───────────────────────────────────────────────────────────
-max_def    = float(np.max(np.abs(y_arr)))
-x_max_def  = float(x_arr[np.argmax(np.abs(y_arr))])
-max_M_abs  = float(np.max(np.abs(M_arr)))
-max_V_abs  = float(np.max(np.abs(V_arr)))
-max_stress = float(max_M_abs * 1e3 * c_dist / I / 1e6)   # MPa
+y_mm    = -v * 1e3
+max_del = float(np.max(np.abs(y_mm)))
+x_del   = float(x[np.argmax(np.abs(y_mm))])
+max_M   = float(np.max(np.abs(M)))
+max_V   = float(np.max(np.abs(V)))
+checks  = run_checks(L, max_M, max_V, max_del, sp, P_axial, E, Fy)
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Max Deflection",     f"{max_def:.3f} mm",     f"at x = {x_max_def:.2f} m")
-m2.metric("Max Moment",         f"{max_M_abs:.2f} kNm")
-m3.metric("Max Shear",          f"{max_V_abs:.2f} kN")
-m4.metric("Max Bending Stress", f"{max_stress:.1f} MPa")
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN LAYOUT
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── Reactions ─────────────────────────────────────────────────────────────────
+st.title(f"🏗️ {proj_name}")
+
+md,ld = dsp(max_del*1e-3,"d",U); mM,lM = dsp(max_M,"M",U)
+mV,lV = dsp(max_V,"F",U);        ms,ls = dsp(max_M*sp["c"]/sp["I"],"s",U)
+xd,_  = dsp(x_del,"L",U)
+
+c1,c2,c3,c4 = st.columns(4)
+c1.metric("Max Deflection",    f"{md:.3f} {ld}", f"at x = {xd:.2f} {_}")
+c2.metric("Max Moment",        f"{mM:.3f} {lM}")
+c3.metric("Max Shear",         f"{mV:.3f} {lV}")
+c4.metric("Max Bending Stress",f"{ms:.1f} {ls}")
+
 st.markdown("#### Reactions")
-r_cols = st.columns(len(reactions))
-for col, (name, val) in zip(r_cols, reactions.items()):
-    col.metric(name, f"{val:.3f}")
+rcols = st.columns(len(reactions))
+for col,(name,val) in zip(rcols,reactions.items()):
+    qty = "F" if "↑" in name else "M"
+    vd,lb = dsp(abs(val),qty,U)
+    col.metric(name, f"{vd:.3f} {lb}")
 
 st.markdown("---")
 
-# ── Plot ──────────────────────────────────────────────────────────────────────
-fig = make_figure(x_arr, V_arr, M_arr, y_arr,
-                  float(L), point_loads, dist_loads, support)
-st.pyplot(fig, use_container_width=True)
-plt.close(fig)
+tab_res, tab_anim, tab_il, tab_chk, tab_rep = st.tabs([
+    "📊  Results",
+    "🎬  Animated Deflection",
+    "📈  Influence Lines",
+    "✅  Checks",
+    "📄  Report",
+])
 
-# ── Data Table ────────────────────────────────────────────────────────────────
-with st.expander("📊 Tabular Data  (every 10th node)"):
-    import pandas as pd
-    step = max(1, len(x_arr) // 50)
-    df = pd.DataFrame({
-        "x (m)":    np.round(x_arr[::step], 3),
-        "V (kN)":   np.round(V_arr[::step], 3),
-        "M (kNm)":  np.round(M_arr[::step], 3),
-        "δ (mm)":   np.round(y_arr[::step], 4),
-    })
-    st.dataframe(df, use_container_width=True, height=300)
+# ── TAB 1 ─────────────────────────────────────────────────────────────────────
+with tab_res:
+    col_main, col_side = st.columns([3,1])
+    with col_main:
+        fig = plot_results(x, V, M, y_mm, L, pt_loads_raw, dist_loads_raw, support, U)
+        st.pyplot(fig, use_container_width=True); plt.close(fig)
+    with col_side:
+        st.markdown("**Cross-Section**")
+        fig_s = plot_section(sec_type, sp)
+        st.pyplot(fig_s, use_container_width=True); plt.close(fig_s)
+        st.markdown("**Properties**")
+        Iv,lI2 = dsp(sp["I"],"I",U); Av,lA2 = dsp(sp["A"],"A",U)
+        st.markdown(f"""
+| | |
+|---|---|
+| I | {Iv:.3f} {lI2} |
+| A | {Av:.2f} {lA2} |
+| d | {sp['d']*1e3:.1f} mm |
+| c | {sp['c']*1e3:.1f} mm |
+""")
+
+    with st.expander("📋  Tabular Data"):
+        step = max(1,len(x)//60)
+        fvv,lvv = dsp(1.0,"F",U); fmm,lmm = dsp(1.0,"M",U)
+        fdd,ldd = dsp(1e-3,"d",U); fll,lll = dsp(1.0,"L",U)
+        df = pd.DataFrame({
+            f"x ({lll})":   np.round(x[::step]*fll,3),
+            f"V ({lvv})":   np.round(V[::step]*fvv,3),
+            f"M ({lmm})":   np.round(M[::step]*fmm,3),
+            f"δ ({ldd}) ↓": np.round(y_mm[::step]*fdd,4),
+        })
+        st.dataframe(df, use_container_width=True, height=280)
+
+# ── TAB 2 ─────────────────────────────────────────────────────────────────────
+with tab_anim:
+    st.markdown("Press **▶ Play** to watch the beam deflect under increasing load, "
+                "or drag the slider to a specific load percentage.")
+    with st.spinner("Building animation…"):
+        anim = plotly_animation(L, EI, support, pt_loads_raw, dist_loads_raw)
+    st.plotly_chart(anim, use_container_width=True)
+
+# ── TAB 3 ─────────────────────────────────────────────────────────────────────
+with tab_il:
+    st.markdown(
+        "Shows how a structural response **at a fixed point** varies as a "
+        "**unit load moves** across the beam. Identifies the critical load position."
+    )
+    ca,cb,cc = st.columns(3)
+    _,lLi = dsp(1.0,"L",U)
+    x_tgt_d  = ca.slider(f"Response point  ({lLi})", 0.0, float(L_disp), float(L_disp/2), 0.01)
+    x_tgt    = to_si(x_tgt_d,"L",U)
+    resp_sel = cb.selectbox("Response", ["Moment (M)", "Shear (V)", "Deflection (δ)"])
+    resp_key = "M" if "M" in resp_sel else ("V" if "V" in resp_sel else "delta")
+
+    if cc.button("Compute  →"):
+        with st.spinner("Sweeping unit load…"):
+            pos_il, IL = influence_line(L, EI, 80, support, x_tgt, resp_key)
+
+        if resp_key=="M":     fac,lb2 = dsp(1.0,"M",U); resp_title="Moment"
+        elif resp_key=="V":   fac,lb2 = dsp(1.0,"F",U); resp_title="Shear"
+        else:                 fac,lb2 = (1.0,"mm");      resp_title="Deflection"
+
+        IL_d = IL * fac
+        pos_d = pos_il * dsp(1.0,"L",U)[0]
+
+        fig_il = go.Figure()
+        fig_il.add_trace(go.Scatter(x=pos_d, y=IL_d, mode="lines+markers",
+            line=dict(color="#74b9ff",width=2), marker=dict(size=4), name=f"IL — {resp_title}"))
+        fig_il.add_hline(y=0, line_color="#333", line_width=1)
+        fig_il.add_vline(x=x_tgt_d, line_color="#ffd166", line_dash="dash",
+                         annotation_text="Response point", annotation_font_color="#ffd166")
+        fig_il.update_layout(
+            title=f"Influence Line — {resp_title} at x = {x_tgt_d:.2f} {lLi}",
+            xaxis_title=f"Load position  ({lLi})", yaxis_title=f"IL ordinate  ({lb2})",
+            paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
+            font=dict(color="#888"), height=380,
+        )
+        st.plotly_chart(fig_il, use_container_width=True)
+        best_pos = pos_d[np.argmax(np.abs(IL_d))]
+        st.info(f"💡  Critical load position: **x = {best_pos:.3f} {lLi}** maximises |{resp_title}| at the response point.")
+
+# ── TAB 4 ─────────────────────────────────────────────────────────────────────
+with tab_chk:
+    st.markdown(f"**{mat_key}** — E = {E*1e-9:.0f} GPa · Fy = {Fy*1e-6:.0f} MPa")
+    if P_axial != 0:
+        sv,sl = dsp(abs(P_axial),"F",U)
+        st.markdown(f"Axial load: **{sv:.3f} {sl}** ({'tension +'  if P_axial>0 else 'compression −'})")
+
+    has_fail = any(c["status"]=="FAIL" for c in checks)
+    has_warn = any(c["status"]=="WARN" for c in checks)
+    if has_fail:    st.error("⚠️  One or more checks FAIL.")
+    elif has_warn:  st.warning("🔶  All strength checks pass — review LTB (lateral bracing).")
+    else:           st.success("✅  All checks pass.")
+
+    for ch in checks:
+        box_cls = "pass-box" if ch["status"]=="PASS" else ("warn-box" if ch["status"]=="WARN" else "fail-box")
+        st.markdown(f"""
+<div class="{box_cls}">
+  <b>{ch['name']}</b> &nbsp;·&nbsp;
+  Demand: {ch['demand']:.3g} {ch['unit']} &nbsp;·&nbsp;
+  Capacity: {ch['cap']:.3g} {ch['unit']} &nbsp;·&nbsp;
+  Ratio: <b>{ch['ratio']:.3f}</b> &nbsp;·&nbsp;
+  <b>{ch['status']}</b>
+</div>""", unsafe_allow_html=True)
+        st.progress(min(ch["ratio"], 1.0))
+
+    st.markdown("#### Factor of Safety")
+    fos_rows = [{"Check": c["name"],
+                 "FOS":   round(1/c["ratio"],2) if c["ratio"]>0.001 else "∞",
+                 "Status": c["status"]} for c in checks]
+    st.dataframe(pd.DataFrame(fos_rows), use_container_width=True, hide_index=True)
+
+# ── TAB 5 ─────────────────────────────────────────────────────────────────────
+with tab_rep:
+    ca,cb = st.columns(2)
+
+    with ca:
+        st.markdown("### 📄 PDF Report")
+        st.caption("Two-page PDF: project summary with checks + full diagrams.")
+        if st.button("Generate PDF Report"):
+            with st.spinner("Building report…"):
+                pdf_buf = make_pdf(L,E,Fy,support,sec_type,sp,
+                                   pt_loads_raw,dist_loads_raw,P_axial,
+                                   x,V,M,y_mm,reactions,checks,proj_name,U)
+            st.download_button("⬇️  Download PDF", data=pdf_buf,
+                file_name=f"{proj_name.replace(' ','_')}_report.pdf",
+                mime="application/pdf")
+
+    with cb:
+        st.markdown("### 💾 Save / Load Config")
+        if st.button("Save Configuration"):
+            fll2,_ = dsp(1.0,"L",U); fvv2,_ = dsp(1.0,"F",U); fww2,_ = dsp(1.0,"w",U)
+            cfg = {
+                "project":  proj_name,
+                "units":    unit_key,
+                "material": mat_key,
+                "E_GPa":    mat["E_GPa"],
+                "Fy_MPa":   mat["Fy_MPa"],
+                "support":  support,
+                "L_display":L_disp,
+                "sec_type": sec_type,
+                "sec_params":sec_params,
+                "P_axial_display": P_ax_disp,
+                "pt_loads_display": [[xp*fll2, P*fvv2] for xp,P in pt_loads_raw],
+                "dist_loads_display": [[x1*fll2,x2*fll2,w*fww2] for x1,x2,w in dist_loads_raw],
+            }
+            st.download_button("⬇️  Download JSON", data=json.dumps(cfg,indent=2),
+                file_name=f"{proj_name.replace(' ','_')}_config.json",
+                mime="application/json")
+
+        st.markdown("---")
+        uploaded = st.file_uploader("Load configuration (.json)", type="json")
+        if uploaded:
+            cfg = json.load(uploaded)
+            st.success(f"Loaded: **{cfg.get('project','?')}** — {cfg.get('support','?')}, L={cfg.get('L_display','?')}")
+            st.info("Re-enter the values shown below into the sidebar to restore the configuration.")
+            with st.expander("Configuration data"):
+                st.json(cfg)
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <br>
-<p style='color:#444; font-size:0.75rem; font-family:monospace; text-align:center;'>
-Beam Deflection Calculator · Method of Integration · E·I·y'' = M(x)<br>
-Simply Supported: y(0)=y(L)=0 · Cantilever: y(0)=y'(0)=0
+<p style='color:#2a2d3a; font-size:0.72rem; font-family:monospace; text-align:center;'>
+Beam Analysis Suite  ·  Euler-Bernoulli FEM (300 elements)
+·  EI·y′′ = M(x)  ·  4 support conditions  ·  SI & Imperial
 </p>
 """, unsafe_allow_html=True)
