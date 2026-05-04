@@ -286,21 +286,6 @@ def fem_solve(L, EI, n_elem, support, pt_loads, dist_loads):
     return x_nodes, v, M, V, theta, react
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  INFLUENCE LINES
-# ══════════════════════════════════════════════════════════════════════════════
-
-def influence_line(L, EI, n_il, support, x_target, response):
-    positions = np.linspace(0, L, n_il+1)
-    IL = np.zeros_like(positions)
-    for i, xp in enumerate(positions):
-        x, v, M, V, _, _ = fem_solve(L, EI, n_il, support, [(xp, 1.0)], [])
-        idx = int(np.argmin(np.abs(x - x_target)))
-        if response == "M":       IL[i] = M[idx]
-        elif response == "V":     IL[i] = V[idx]
-        else:                     IL[i] = -v[idx]*1e3
-    return positions, IL
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  STRUCTURAL CHECKS
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -478,63 +463,6 @@ def plot_section(sec_type, sp):
 
     ax.plot(0,0,"+",color=ACC,ms=10,mew=1.5)
     ax.text(0.02*sp["bf"]*1e3,0,"  NA",color=ACC,fontsize=7,fontfamily="monospace")
-    return fig
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PLOTLY ANIMATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-def plotly_animation(L, EI, support, pt_loads, dist_loads, n_elem=200, n_frames=25):
-    alphas = np.linspace(0, 1, n_frames)
-    frames_xy = []
-    for alpha in alphas:
-        pl = [(xp, P*alpha) for xp,P in pt_loads]
-        dl = [(x1,x2,w*alpha) for x1,x2,w in dist_loads]
-        xn, vn, _, _, _, _ = fem_solve(L, EI, n_elem, support, pl, dl)
-        frames_xy.append((xn.tolist(), (-vn*1e3).tolist()))
-
-    x0, y0 = frames_xy[0]
-
-    frames = [
-        go.Frame(data=[
-            go.Scatter(x=fd[0], y=fd[1], mode="lines",
-                       line=dict(color="#4ecca3", width=3)),
-            go.Scatter(x=fd[0], y=[0]*len(fd[0]), mode="lines",
-                       line=dict(color="#2a2a3a", width=1, dash="dot")),
-        ], name=str(i))
-        for i, fd in enumerate(frames_xy)
-    ]
-
-    fig = go.Figure(
-        data=[
-            go.Scatter(x=x0,y=y0,mode="lines",line=dict(color="#4ecca3",width=3),name="Deflected"),
-            go.Scatter(x=x0,y=[0]*len(x0),mode="lines",line=dict(color="#2a2a3a",width=1,dash="dot"),name="Original"),
-        ],
-        frames=frames,
-        layout=go.Layout(
-            title=dict(text="Beam Deflection Animation",font=dict(family="monospace",size=13,color="#ccc")),
-            paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
-            font=dict(color="#888"),
-            xaxis=dict(title="x (m)",color="#888",gridcolor="#1e2230",range=[-0.02*L,1.02*L]),
-            yaxis=dict(title="Deflection (mm ↓)",color="#888",gridcolor="#1e2230",autorange="reversed"),
-            margin=dict(l=60,r=20,t=55,b=60), height=400,
-            updatemenus=[dict(
-                type="buttons", showactive=False, y=1.08, x=0.5, xanchor="center",
-                buttons=[
-                    dict(label="▶  Play", method="animate",
-                         args=[None,dict(frame=dict(duration=55,redraw=True),fromcurrent=True,mode="immediate")]),
-                    dict(label="⏹  Stop", method="animate",
-                         args=[[None],dict(frame=dict(duration=0),mode="immediate")]),
-                ],
-            )],
-            sliders=[dict(
-                steps=[dict(method="animate",args=[[str(i)],dict(frame=dict(duration=0),mode="immediate")],
-                            label=f"{int(a*100)}%") for i,a in enumerate(alphas)],
-                x=0.05, len=0.9, y=-0.08,
-                currentvalue=dict(prefix="Load factor: ",suffix="%",font=dict(color="#888")),
-            )],
-        )
-    )
     return fig
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -737,10 +665,8 @@ for col,(name,val) in zip(rcols,reactions.items()):
 
 st.markdown("---")
 
-tab_res, tab_anim, tab_il, tab_chk, tab_col, tab_rep = st.tabs([
+tab_res, tab_chk, tab_col, tab_rep = st.tabs([
     "📊  Results",
-    "🎬  Animated Deflection",
-    "📈  Influence Lines",
     "✅  Checks",
     "🏛️  Column Buckling",
     "📄  Report",
@@ -780,54 +706,6 @@ with tab_res:
         st.dataframe(df, use_container_width=True, height=280)
 
 # ── TAB 2 ─────────────────────────────────────────────────────────────────────
-with tab_anim:
-    st.markdown("Press **▶ Play** to watch the beam deflect under increasing load, "
-                "or drag the slider to a specific load percentage.")
-    with st.spinner("Building animation…"):
-        anim = plotly_animation(L, EI, support, pt_loads_raw, dist_loads_raw)
-    st.plotly_chart(anim, use_container_width=True)
-
-# ── TAB 3 ─────────────────────────────────────────────────────────────────────
-with tab_il:
-    st.markdown(
-        "Shows how a structural response **at a fixed point** varies as a "
-        "**unit load moves** across the beam. Identifies the critical load position."
-    )
-    ca,cb,cc = st.columns(3)
-    _,lLi = dsp(1.0,"L",U)
-    x_tgt_d  = ca.slider(f"Response point  ({lLi})", 0.0, float(L_disp), float(L_disp/2), 0.01)
-    x_tgt    = to_si(x_tgt_d,"L",U)
-    resp_sel = cb.selectbox("Response", ["Moment (M)", "Shear (V)", "Deflection (δ)"])
-    resp_key = "M" if "M" in resp_sel else ("V" if "V" in resp_sel else "delta")
-
-    if cc.button("Compute  →"):
-        with st.spinner("Sweeping unit load…"):
-            pos_il, IL = influence_line(L, EI, 80, support, x_tgt, resp_key)
-
-        if resp_key=="M":     fac,lb2 = dsp(1.0,"M",U); resp_title="Moment"
-        elif resp_key=="V":   fac,lb2 = dsp(1.0,"F",U); resp_title="Shear"
-        else:                 fac,lb2 = (1.0,"mm");      resp_title="Deflection"
-
-        IL_d = IL * fac
-        pos_d = pos_il * dsp(1.0,"L",U)[0]
-
-        fig_il = go.Figure()
-        fig_il.add_trace(go.Scatter(x=pos_d, y=IL_d, mode="lines+markers",
-            line=dict(color="#74b9ff",width=2), marker=dict(size=4), name=f"IL — {resp_title}"))
-        fig_il.add_hline(y=0, line_color="#333", line_width=1)
-        fig_il.add_vline(x=x_tgt_d, line_color="#ffd166", line_dash="dash",
-                         annotation_text="Response point", annotation_font_color="#ffd166")
-        fig_il.update_layout(
-            title=f"Influence Line — {resp_title} at x = {x_tgt_d:.2f} {lLi}",
-            xaxis_title=f"Load position  ({lLi})", yaxis_title=f"IL ordinate  ({lb2})",
-            paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
-            font=dict(color="#888"), height=380,
-        )
-        st.plotly_chart(fig_il, use_container_width=True)
-        best_pos = pos_d[np.argmax(np.abs(IL_d))]
-        st.info(f"💡  Critical load position: **x = {best_pos:.3f} {lLi}** maximises |{resp_title}| at the response point.")
-
-# ── TAB 4 ─────────────────────────────────────────────────────────────────────
 with tab_chk:
     st.markdown(f"**{mat_key}** — E = {E*1e-9:.0f} GPa · Fy = {Fy*1e-6:.0f} MPa")
 
@@ -855,12 +733,11 @@ with tab_chk:
                  "Status": c["status"]} for c in checks]
     st.dataframe(pd.DataFrame(fos_rows), use_container_width=True, hide_index=True)
 
-# ── TAB 5 — COLUMN BUCKLING ──────────────────────────────────────────────────
+# ── TAB 3 — COLUMN BUCKLING ──────────────────────────────────────────────────
 with tab_col:
     st.markdown(
         "Analyse the member as a **column** under axial compression. "
-        "Inputs here are independent of the beam analysis — you can vary "
-        "column length, end conditions, and applied load freely."
+        "Inputs are independent of the beam analysis above."
     )
 
     # ── Column inputs ─────────────────────────────────────────────────────────
@@ -879,121 +756,229 @@ with tab_col:
         "Fixed – Fixed     (K = 0.5)",
     ], key="col_end")
     K_map = {
-        "Pinned – Pinned   (K = 1.0)":   1.0,
-        "Fixed – Free      (K = 2.0)":   2.0,
-        "Fixed – Pinned    (K = 0.699)":  0.699,
-        "Fixed – Fixed     (K = 0.5)":   0.5,
+        "Pinned – Pinned   (K = 1.0)":  1.0,
+        "Fixed – Free      (K = 2.0)":  2.0,
+        "Fixed – Pinned    (K = 0.699)": 0.699,
+        "Fixed – Fixed     (K = 0.5)":  0.5,
     }
     K = K_map[end_cond]
 
     _, lFc = dsp(1.0,"F",U)
-    Papplied_disp = c3c.number_input(f"Applied Axial Load  ({lFc})  [compression +]",
-                                      0.0, value=0.0, key="col_P")
+    Papplied_disp = c3c.number_input(
+        f"Applied Axial Load  ({lFc})  [compression +]", 0.0, value=0.0, key="col_P")
     P_applied = to_si(Papplied_disp,"F",U)
 
-    # ── Derived column quantities ─────────────────────────────────────────────
+    # ── Eccentricity toggle ───────────────────────────────────────────────────
+    st.markdown("#### Loading Type")
+    load_type = st.radio("", ["Concentric  (e = 0)", "Eccentric  (e > 0)"],
+                         horizontal=True, key="col_loadtype")
+    eccentric = (load_type == "Eccentric  (e > 0)")
+
+    ecc_mm = 0.0
+    if eccentric:
+        ec1, ec2 = st.columns(2)
+        ecc_mm = ec1.number_input("Eccentricity  e  (mm)", 0.0, 5000.0, 10.0,
+                                   key="col_ecc")
+        ec2.markdown("""
+<div style='font-family:monospace;font-size:0.8rem;color:#888;padding-top:0.4rem'>
+<b>Secant formula:</b><br>
+σ_max = P/A · [1 + (e·c/r²) · sec(KL/2r · √(P/EA))]<br><br>
+Failure when σ_max = Fy.
+</div>""", unsafe_allow_html=True)
+    ecc = ecc_mm * 1e-3   # m
+
+    # ── Core buckling quantities ──────────────────────────────────────────────
     A_col  = sp["A"]; I_col = sp["I"]; Iy_col = sp["Iy"]
-    I_min  = min(I_col, Iy_col)                       # buckles about weak axis
+    c_col  = sp["c"]                              # extreme-fibre distance (strong axis)
+    I_min  = min(I_col, Iy_col)
     r_min  = np.sqrt(I_min / A_col) if A_col > 0 else 1e-9
-    Le_col = K * Lc                                    # effective length [m]
-    SR     = Le_col / r_min                            # slenderness ratio
+    Le_col = K * Lc
+    SR     = Le_col / r_min
 
-    # Euler critical load and stress
     Pcr_euler = (np.pi**2 * E * I_min) / Le_col**2 if Le_col > 0 else 0.0
-    sig_cr_euler = Pcr_euler / A_col if A_col > 0 else 0.0
-
-    # Transition slenderness ratio Cc (Euler–Johnson boundary)
     Cc = np.sqrt(2 * np.pi**2 * E / Fy) if Fy > 0 else 200.0
 
-    # Johnson parabolic formula (intermediate columns, SR < Cc)
     if SR <= Cc:
-        sig_cr_johnson = Fy * (1.0 - SR**2 / (2 * Cc**2))
+        sig_cr_johnson = Fy * (1.0 - SR**2 / (2*Cc**2))
         Pcr_johnson    = sig_cr_johnson * A_col
         regime = "Johnson (intermediate)"
     else:
-        sig_cr_johnson = sig_cr_euler
+        sig_cr_johnson = Pcr_euler / A_col
         Pcr_johnson    = Pcr_euler
         regime = "Euler (long column)"
 
-    sig_cr = sig_cr_johnson      # governing critical stress
+    sig_cr = sig_cr_johnson
     Pcr    = Pcr_johnson
 
-    FOS_col = Pcr / P_applied if P_applied > 0 else float("inf")
-    col_status = "PASS" if (P_applied == 0 or FOS_col >= 1.0) else "FAIL"
+    # ── Secant formula helpers ────────────────────────────────────────────────
+    def secant_stress(P, A, e, c, r, Le, E_mod):
+        """Max compressive stress via secant formula. Returns MPa-scale float."""
+        if P <= 0 or A <= 0:
+            return 0.0
+        arg = (Le / (2*r)) * np.sqrt(P / (E_mod * A))
+        # sec(arg) blows up as arg → π/2 (i.e. P → Pcr_euler)
+        arg = min(arg, np.pi/2 - 1e-6)
+        return (P/A) * (1.0 + (e * c / r**2) * (1.0 / np.cos(arg)))
+
+    def secant_yield_load(A, e, c, r, Le, E_mod, Fy_val, Pcr_lim):
+        """Find load P_y at which secant stress first reaches Fy (bisection)."""
+        if e == 0:
+            return Fy_val * A    # concentric: yield load = Fy * A
+        lo, hi = 1.0, Pcr_lim * 0.9999
+        for _ in range(80):
+            mid = (lo + hi) / 2
+            if secant_stress(mid, A, e, c, r, Le, E_mod) >= Fy_val:
+                hi = mid
+            else:
+                lo = mid
+        return (lo + hi) / 2
+
+    # ── Eccentric midspan deflection ──────────────────────────────────────────
+    def midspan_deflection(P, e, Pcr_e):
+        """δ_mid = e·[sec(π/2·√(P/Pcr_e)) − 1]  (pinned-pinned equivalent)."""
+        if P <= 0 or Pcr_e <= 0 or e == 0:
+            return 0.0
+        ratio = min(P / Pcr_e, 0.9999)
+        return e * (1.0 / np.cos(np.pi/2 * np.sqrt(ratio)) - 1.0)
+
+    # ── Eccentric results ─────────────────────────────────────────────────────
+    if eccentric and ecc > 0:
+        sig_max_applied = secant_stress(
+            P_applied if P_applied > 0 else 1e-6,
+            A_col, ecc, c_col, r_min, Le_col, E)
+        P_yield = secant_yield_load(A_col, ecc, c_col, r_min, Le_col, E, Fy, Pcr_euler)
+        delta_mid_m = midspan_deflection(
+            P_applied if P_applied > 0 else 0.0, ecc, Pcr_euler)
+        delta_mid_mm = delta_mid_m * 1e3
+        ecc_ratio = ecc * c_col / r_min**2     # eccentricity ratio  ec/r²
+        FOS_col   = P_yield / P_applied if P_applied > 0 else float("inf")
+        col_status = "PASS" if (P_applied == 0 or FOS_col >= 1.0) else "FAIL"
+        stress_ok  = (sig_max_applied <= Fy) if P_applied > 0 else True
+    else:
+        sig_max_applied = (P_applied / A_col) if P_applied > 0 else 0.0
+        P_yield   = Fy * A_col
+        delta_mid_mm = 0.0
+        ecc_ratio = 0.0
+        FOS_col   = Pcr / P_applied if P_applied > 0 else float("inf")
+        col_status = "PASS" if (P_applied == 0 or FOS_col >= 1.0) else "FAIL"
+        stress_ok  = True
 
     # ── Summary metrics ───────────────────────────────────────────────────────
     st.markdown("#### Results")
-    m1,m2,m3,m4 = st.columns(4)
-
-    Pcr_d,  lPcr = dsp(Pcr,  "F", U)
-    scr_d,  lscr = dsp(sig_cr,"s", U)
-    Papp_d, lPa  = dsp(P_applied,"F",U)
-
-    m1.metric("Critical Load  Pcr",       f"{Pcr_d:.3f} {lPcr}")
-    m2.metric("Critical Stress  σcr",     f"{scr_d:.3f} {lscr}")
-    m3.metric("Slenderness Ratio  KL/r",  f"{SR:.1f}")
-    m4.metric("Factor of Safety",
-              f"{FOS_col:.2f}" if P_applied > 0 else "—",
-              delta="PASS" if col_status=="PASS" else "FAIL",
-              delta_color="normal" if col_status=="PASS" else "inverse")
+    if eccentric and ecc > 0:
+        m1,m2,m3,m4,m5 = st.columns(5)
+        Py_d, lPy   = dsp(P_yield,  "F", U)
+        sm_d, lsm   = dsp(sig_max_applied, "s", U)
+        dd_d, ldd_c = dsp(delta_mid_mm*1e-3, "d", U)
+        m1.metric("Euler Pcr",             f"{dsp(Pcr_euler,'F',U)[0]:.3f} {lPy}")
+        m2.metric("Yield Load  Py",        f"{Py_d:.3f} {lPy}")
+        m3.metric("σ_max  (secant)",       f"{sm_d:.2f} {lsm}")
+        m4.metric("Midspan Deflection δ",  f"{dd_d:.3f} {ldd_c}")
+        m5.metric("FOS  (vs Py)",
+                  f"{FOS_col:.2f}" if P_applied > 0 else "—",
+                  delta="PASS" if col_status=="PASS" else "FAIL",
+                  delta_color="normal" if col_status=="PASS" else "inverse")
+    else:
+        m1,m2,m3,m4 = st.columns(4)
+        Pcr_d, lPcr = dsp(Pcr,   "F", U)
+        scr_d, lscr = dsp(sig_cr,"s", U)
+        m1.metric("Critical Load  Pcr",      f"{Pcr_d:.3f} {lPcr}")
+        m2.metric("Critical Stress  σcr",    f"{scr_d:.3f} {lscr}")
+        m3.metric("Slenderness Ratio  KL/r", f"{SR:.1f}")
+        m4.metric("FOS  (vs Pcr)",
+                  f"{FOS_col:.2f}" if P_applied > 0 else "—",
+                  delta="PASS" if col_status=="PASS" else "FAIL",
+                  delta_color="normal" if col_status=="PASS" else "inverse")
 
     # Status banner
     if P_applied == 0:
-        st.info(f"ℹ️  No applied load entered. Regime: **{regime}** · Cc = {Cc:.1f}")
+        st.info(f"ℹ️  No applied load entered. Regime: **{regime}**  ·  Cc = {Cc:.1f}"
+                + (f"  ·  ec/r² = {ecc_ratio:.3f}" if eccentric and ecc>0 else ""))
     elif col_status == "PASS":
-        st.success(f"✅  Column is stable — FOS = {FOS_col:.2f}   [{regime}]")
+        st.success(f"✅  Column OK — FOS = {FOS_col:.2f}   [{regime}]")
     else:
-        st.error(f"❌  Applied load exceeds Pcr — column will buckle!  [{regime}]")
+        st.error(f"❌  Applied load exceeds capacity — column will fail!   [{regime}]")
 
     st.markdown("---")
 
-    # ── Two-panel plot: buckled shape + column curve ──────────────────────────
-    col_left, col_right = st.columns([1,2])
+    # ── Plots ─────────────────────────────────────────────────────────────────
+    col_left, col_right = st.columns([1, 2])
 
+    # ── Left: column schematic with eccentric offset ──────────────────────────
     with col_left:
-        st.markdown("**Buckled Shape**")
-        fig_bk, ax_bk = plt.subplots(figsize=(3, 5), facecolor=BG)
+        st.markdown("**Column Schematic**")
+        fig_bk, ax_bk = plt.subplots(figsize=(3, 5.2), facecolor=BG)
         ax_bk.set_facecolor(CARD)
         for spine in ax_bk.spines.values(): spine.set_color(GRID)
         ax_bk.tick_params(colors="#888", labelsize=8)
-        ax_bk.set_xlim(-1.5, 1.5); ax_bk.set_ylim(-0.05*Lc, 1.05*Lc)
-        ax_bk.set_xlabel("δ  (normalized)", color="#888", fontsize=8)
-        ax_bk.set_ylabel(f"Height  ({lLc})", color="#888", fontsize=8)
+        ax_bk.set_xlim(-2.0, 2.0); ax_bk.set_ylim(-0.07*Lc, 1.12*Lc)
         ax_bk.set_xticks([]); ax_bk.yaxis.set_major_formatter(
-            matplotlib.ticker.FuncFormatter(lambda v,_: f"{v*dsp(1.0,'L',U)[0]:.1f}"))
+            matplotlib.ticker.FuncFormatter(
+                lambda v, _: f"{v*dsp(1.0,'L',U)[0]:.1f}"))
+        ax_bk.set_ylabel(f"Height  ({lLc})", color="#888", fontsize=8)
 
-        # Buckled shape half-sine for the mode corresponding to end condition
-        y_col = np.linspace(0, Lc, 200)
-        # Mode shape: sin(π*y/Le) adjusted for pinned ends; for others approximate
-        # with mode reflecting the effective half-wavelength
-        if K == 2.0:   # fixed-free: quarter sine
-            delta = np.sin(np.pi*y_col / (2*Le_col))
-        elif K == 0.5: # fixed-fixed: full sine (2 half-waves)
-            delta = np.sin(2*np.pi*y_col / (Le_col))
-        else:           # pinned-pinned and fixed-pinned: half-sine
-            delta = np.sin(np.pi*y_col / Le_col)
+        y_col = np.linspace(0, Lc, 300)
 
-        # Draw undeflected centreline
-        ax_bk.plot([0,0],[0,Lc], color="#333", lw=1.5, ls="dashed")
-        # Buckled shape
-        ax_bk.plot(delta, y_col, color=ACC, lw=2.5, label="Buckled")
-        ax_bk.fill_betweenx(y_col, 0, delta, alpha=0.15, color=ACC)
+        # Buckled / deflected shape
+        if eccentric and ecc > 0 and P_applied > 0:
+            # Elastic deflection under eccentric load (pinned-pinned form)
+            ratio_P = min(P_applied / Pcr_euler, 0.9999) if Pcr_euler > 0 else 0
+            phi = np.pi/2 * np.sqrt(ratio_P)
+            # v(y) = e * [sec(φ)·cos(π*y/Le - φ) + tan(φ)·sin(π*y/Le) − cos(π*y/Le) − 1]
+            # Simplified sinusoidal approximation for display:
+            k_arg = np.sqrt(P_applied / (E * I_min)) if (E*I_min) > 0 else 0
+            try:
+                delta_shape = (ecc / np.cos(k_arg * Le_col / 2)) * np.cos(
+                    k_arg * (y_col - Le_col/2)) - ecc
+            except ZeroDivisionError:
+                delta_shape = np.zeros_like(y_col)
+            # Scale for display; max normalized to 1.0
+            max_d = np.max(np.abs(delta_shape))
+            delta_norm = delta_shape / max_d if max_d > 0 else delta_shape
+            shape_color = RED if col_status == "FAIL" else ACC
+            label_shape = "Deflected (eccentric)"
+        else:
+            # Pure buckling mode shape
+            if K == 2.0:
+                delta_norm = np.sin(np.pi*y_col / (2*Le_col))
+            elif K == 0.5:
+                delta_norm = np.sin(2*np.pi*y_col / Le_col)
+            else:
+                delta_norm = np.sin(np.pi*y_col / Le_col)
+            shape_color = ACC
+            label_shape = "Buckled mode shape"
+
+        ax_bk.plot([0,0],[0,Lc], color="#333", lw=1.5, ls="dashed", label="Centroidal axis")
+        ax_bk.plot(delta_norm, y_col, color=shape_color, lw=2.5, label=label_shape)
+        ax_bk.fill_betweenx(y_col, 0, delta_norm, alpha=0.13, color=shape_color)
+
+        # Eccentricity offset indicator at top and bottom
+        if eccentric and ecc > 0:
+            ecc_norm = ecc / (sp["c"] * 2) * 0.8   # scale relative to section depth
+            for y_pos in [0.0, Lc]:
+                ax_bk.annotate("", xy=(ecc_norm, y_pos),
+                    xytext=(0, y_pos),
+                    arrowprops=dict(arrowstyle="<->", color=ORG, lw=1.2))
+            ax_bk.text(ecc_norm/2, Lc*0.03, f"e={ecc_mm:.1f}mm",
+                       color=ORG, fontsize=7, fontfamily="monospace", ha="center")
 
         # End condition symbols
         def draw_pin(axx, y_pos, col_):
             size = Lc*0.04
-            axx.add_patch(plt.Polygon([[0,y_pos],[-size,y_pos-1.5*size],[size,y_pos-1.5*size]],
+            axx.add_patch(plt.Polygon(
+                [[0,y_pos],[-size,y_pos-1.5*size],[size,y_pos-1.5*size]],
                 facecolor="#3a4060", edgecolor=col_, lw=1.2))
-            axx.plot([-2*size,2*size],[y_pos-1.5*size,y_pos-1.5*size],color=col_,lw=1.5)
+            axx.plot([-2*size,2*size],[y_pos-1.5*size,y_pos-1.5*size], color=col_, lw=1.5)
 
         def draw_fixed(axx, y_pos, col_):
             size = Lc*0.04
-            axx.add_patch(patches.Rectangle((-3*size, y_pos-size), 6*size, size,
+            axx.add_patch(patches.Rectangle(
+                (-3*size, y_pos-size), 6*size, size,
                 facecolor="#1e2640", edgecolor=col_, lw=1.5))
             for hx in np.linspace(-2*size, 2*size, 5):
-                sign = 1 if y_pos==0 else -1
+                sign = 1 if y_pos == 0 else -1
                 axx.plot([hx, hx+0.5*size*sign],[y_pos-size, y_pos-1.5*size*sign],
-                         color="#444",lw=0.8)
+                         color="#444", lw=0.8)
 
         end_labels = {
             "Pinned – Pinned   (K = 1.0)":  ("pin","pin"),
@@ -1002,103 +987,183 @@ with tab_col:
             "Fixed – Fixed     (K = 0.5)":  ("fixed","fixed"),
         }
         bot_end, top_end = end_labels[end_cond]
-
-        if bot_end == "pin":   draw_pin(ax_bk, 0, ACC)
-        else:                  draw_fixed(ax_bk, 0, ACC)
-        if top_end == "pin":   draw_pin(ax_bk, Lc, BLU)
+        if bot_end == "pin":  draw_pin(ax_bk, 0, ACC)
+        else:                 draw_fixed(ax_bk, 0, ACC)
+        if top_end == "pin":  draw_pin(ax_bk, Lc, BLU)
         elif top_end == "free":
-            ax_bk.plot([-0.1,0.1],[Lc,Lc], color=BLU, lw=1.5, ls="dashed")
-        else:                  draw_fixed(ax_bk, Lc, BLU)
+            ax_bk.plot([-0.15,0.15],[Lc,Lc], color=BLU, lw=1.5, ls="dashed")
+        else:                 draw_fixed(ax_bk, Lc, BLU)
 
-        # Applied load arrow
-        arr_x = 0.9
-        ax_bk.annotate("", xy=(arr_x, Lc), xytext=(arr_x, Lc+0.12*Lc),
-            arrowprops=dict(arrowstyle="-|>",color=RED,lw=1.5,mutation_scale=10))
+        # Applied load arrow — offset if eccentric
+        load_x = (ecc / (sp["c"]*2) * 0.8) if (eccentric and ecc > 0) else 0.0
+        ax_bk.annotate("", xy=(load_x, Lc), xytext=(load_x, Lc+0.11*Lc),
+            arrowprops=dict(arrowstyle="-|>", color=RED, lw=1.8, mutation_scale=11))
         if P_applied > 0:
-            Pad,lPad = dsp(P_applied,"F",U)
-            ax_bk.text(arr_x, Lc+0.14*Lc, f"{Pad:.2g}{lPad}", color=RED,
-                       fontsize=7, fontfamily="monospace", ha="center")
+            Pad, lPad = dsp(P_applied,"F",U)
+            ax_bk.text(load_x, Lc+0.13*Lc, f"{Pad:.2g} {lPad}",
+                       color=RED, fontsize=7, fontfamily="monospace", ha="center")
 
-        ax_bk.set_title(f"K = {K}", color="#aaa", fontsize=9, fontfamily="monospace")
-        ax_bk.text(-1.4, Lc*0.5, f"Le = {Le_col*dsp(1.0,'L',U)[0]:.2f} {lLc}",
-                   color="#666", fontsize=7.5, fontfamily="monospace", rotation=90, va="center")
+        ax_bk.set_title(f"K = {K}   Le = {Le_col*dsp(1.0,'L',U)[0]:.2f} {lLc}",
+                        color="#aaa", fontsize=8.5, fontfamily="monospace")
         fig_bk.tight_layout()
         st.pyplot(fig_bk, use_container_width=True); plt.close(fig_bk)
 
+    # ── Right: column curve OR secant P-σ plot ────────────────────────────────
     with col_right:
-        st.markdown("**Column Curve  (σcr vs KL/r)**")
+        if eccentric and ecc > 0:
+            st.markdown("**Secant Formula  —  P vs σ_max**")
 
-        SR_arr = np.linspace(1, max(SR*1.6, Cc*1.4, 200), 500)
-        sig_johnson_arr = np.where(
-            SR_arr <= Cc,
-            Fy * (1 - SR_arr**2 / (2*Cc**2)),
-            np.pi**2 * E / SR_arr**2
-        )
-        sig_euler_arr = np.pi**2 * E / SR_arr**2
+            P_arr = np.linspace(0.001, Pcr_euler * 0.999, 400)
+            sig_arr = np.array([secant_stress(p, A_col, ecc, c_col, r_min, Le_col, E)
+                                for p in P_arr])
+            # Also plot for e = 0 (concentric)
+            sig_conc = P_arr / A_col
 
-        fig_cc = go.Figure()
-        fig_cc.add_trace(go.Scatter(x=SR_arr, y=sig_euler_arr*1e-6,
-            mode="lines", line=dict(color="#555",width=1.5,dash="dash"),
-            name="Euler (full range)"))
-        fig_cc.add_trace(go.Scatter(x=SR_arr, y=sig_johnson_arr*1e-6,
-            mode="lines", line=dict(color=ACC,width=2.5),
-            name="Johnson–Euler (governing)"))
-        fig_cc.add_hline(y=Fy*1e-6, line_color="#ffd166", line_dash="dot",
-                         annotation_text=f"Fy = {Fy*1e-6:.0f} MPa",
-                         annotation_font_color="#ffd166", annotation_position="bottom right")
-        fig_cc.add_vline(x=Cc, line_color="#74b9ff", line_dash="dot",
-                         annotation_text=f"Cc = {Cc:.1f}",
-                         annotation_font_color="#74b9ff")
+            # Eccentricity ratio curves for reference (ec/r² = 0.1, 0.3, 0.6)
+            ref_ratios = [0.1, 0.3, 0.6]
+            ref_colors = ["#3a4a6a","#4a5a7a","#5a6a8a"]
 
-        # Plot current member as a dot
-        fig_cc.add_trace(go.Scatter(
-            x=[SR], y=[sig_cr*1e-6],
-            mode="markers",
-            marker=dict(color=RED if col_status=="FAIL" else ACC,
-                        size=12, symbol="circle", line=dict(color="white",width=1.5)),
-            name=f"This column  (KL/r = {SR:.1f})"
-        ))
-        if P_applied > 0:
-            sig_app = P_applied / A_col
-            fig_cc.add_hline(y=sig_app*1e-6, line_color=RED, line_dash="dot",
-                             annotation_text=f"σ_applied = {sig_app*1e-6:.1f} MPa",
-                             annotation_font_color=RED)
+            fig_sc = go.Figure()
+            for rr, rc in zip(ref_ratios, ref_colors):
+                e_ref = rr * r_min**2 / c_col
+                sig_ref = np.array([secant_stress(p, A_col, e_ref, c_col, r_min, Le_col, E)
+                                    for p in P_arr])
+                fig_sc.add_trace(go.Scatter(
+                    x=sig_ref*1e-6, y=[dsp(p,"F",U)[0] for p in P_arr],
+                    mode="lines", line=dict(color=rc, width=1, dash="dot"),
+                    name=f"ec/r² = {rr}", opacity=0.7))
 
-        fig_cc.update_layout(
-            paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
-            font=dict(color="#888"),
-            xaxis=dict(title="Slenderness Ratio  KL/r", color="#888", gridcolor=GRID),
-            yaxis=dict(title="Critical Stress  σcr  (MPa)", color="#888", gridcolor=GRID),
-            legend=dict(bgcolor="#13151e", bordercolor=GRID, font=dict(size=10)),
-            height=380, margin=dict(l=60,r=20,t=20,b=50),
-        )
-        st.plotly_chart(fig_cc, use_container_width=True)
+            fig_sc.add_trace(go.Scatter(
+                x=sig_conc*1e-6, y=[dsp(p,"F",U)[0] for p in P_arr],
+                mode="lines", line=dict(color="#555", width=1.5, dash="dash"),
+                name="Concentric (e = 0)"))
+            fig_sc.add_trace(go.Scatter(
+                x=sig_arr*1e-6, y=[dsp(p,"F",U)[0] for p in P_arr],
+                mode="lines", line=dict(color=ACC, width=2.5),
+                name=f"This column  (ec/r² = {ecc_ratio:.3f})"))
 
-    # ── Detailed results table ────────────────────────────────────────────────
+            # Fy vertical line
+            fig_sc.add_vline(x=Fy*1e-6, line_color=ORG, line_dash="dot",
+                             annotation_text=f"Fy = {Fy*1e-6:.0f} MPa",
+                             annotation_font_color=ORG)
+            # Pcr horizontal line
+            fig_sc.add_hline(y=dsp(Pcr_euler,"F",U)[0],
+                             line_color=BLU, line_dash="dot",
+                             annotation_text=f"Pcr (Euler)",
+                             annotation_font_color=BLU,
+                             annotation_position="bottom right")
+            # Current operating point
+            if P_applied > 0:
+                fig_sc.add_trace(go.Scatter(
+                    x=[sig_max_applied*1e-6],
+                    y=[dsp(P_applied,"F",U)[0]],
+                    mode="markers",
+                    marker=dict(
+                        color=RED if col_status=="FAIL" else ACC,
+                        size=13, symbol="circle",
+                        line=dict(color="white", width=1.5)),
+                    name="Applied load"))
+
+            _, lFplot = dsp(1.0,"F",U)
+            fig_sc.update_layout(
+                paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
+                font=dict(color="#888"),
+                xaxis=dict(title="Max Compressive Stress  σ_max  (MPa)",
+                           color="#888", gridcolor=GRID),
+                yaxis=dict(title=f"Axial Load  P  ({lFplot})",
+                           color="#888", gridcolor=GRID),
+                legend=dict(bgcolor="#13151e", bordercolor=GRID, font=dict(size=10)),
+                height=400, margin=dict(l=60,r=20,t=20,b=55),
+            )
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+        else:
+            st.markdown("**Column Curve  (σcr vs KL/r)**")
+            SR_arr = np.linspace(1, max(SR*1.6, Cc*1.4, 200), 500)
+            sig_johnson_arr = np.where(
+                SR_arr <= Cc,
+                Fy*(1 - SR_arr**2/(2*Cc**2)),
+                np.pi**2*E/SR_arr**2)
+            sig_euler_arr = np.pi**2*E/SR_arr**2
+
+            fig_cc = go.Figure()
+            fig_cc.add_trace(go.Scatter(
+                x=SR_arr, y=sig_euler_arr*1e-6,
+                mode="lines", line=dict(color="#555",width=1.5,dash="dash"),
+                name="Euler (full range)"))
+            fig_cc.add_trace(go.Scatter(
+                x=SR_arr, y=sig_johnson_arr*1e-6,
+                mode="lines", line=dict(color=ACC,width=2.5),
+                name="Johnson–Euler (governing)"))
+            fig_cc.add_hline(y=Fy*1e-6, line_color=ORG, line_dash="dot",
+                             annotation_text=f"Fy = {Fy*1e-6:.0f} MPa",
+                             annotation_font_color=ORG, annotation_position="bottom right")
+            fig_cc.add_vline(x=Cc, line_color=BLU, line_dash="dot",
+                             annotation_text=f"Cc = {Cc:.1f}",
+                             annotation_font_color=BLU)
+            fig_cc.add_trace(go.Scatter(
+                x=[SR], y=[sig_cr*1e-6], mode="markers",
+                marker=dict(color=RED if col_status=="FAIL" else ACC,
+                            size=12, symbol="circle",
+                            line=dict(color="white",width=1.5)),
+                name=f"This column  (KL/r = {SR:.1f})"))
+            if P_applied > 0:
+                sig_app = P_applied / A_col
+                fig_cc.add_hline(y=sig_app*1e-6, line_color=RED, line_dash="dot",
+                                 annotation_text=f"σ_applied = {sig_app*1e-6:.1f} MPa",
+                                 annotation_font_color=RED)
+            fig_cc.update_layout(
+                paper_bgcolor="#0b0d14", plot_bgcolor="#13151e",
+                font=dict(color="#888"),
+                xaxis=dict(title="Slenderness Ratio  KL/r", color="#888", gridcolor=GRID),
+                yaxis=dict(title="Critical Stress  σcr  (MPa)", color="#888", gridcolor=GRID),
+                legend=dict(bgcolor="#13151e", bordercolor=GRID, font=dict(size=10)),
+                height=400, margin=dict(l=60,r=20,t=20,b=55),
+            )
+            st.plotly_chart(fig_cc, use_container_width=True)
+
+    # ── Detailed summary table ────────────────────────────────────────────────
     st.markdown("#### Detailed Summary")
-    Pcrd,  lPcrd  = dsp(Pcr,  "F", U)
-    scrd,  lscrd  = dsp(sig_cr,"s", U)
-    syd,   lsyd   = dsp(Fy,    "s", U)
-    Led,   lLed   = dsp(Le_col,"L", U)
-    rmd,   lrmd   = dsp(r_min, "L", U)
-    Imin_d,lImin  = dsp(I_min, "I", U)
+    Pcrd,  lPcrd  = dsp(Pcr_euler, "F", U)
+    scrd,  lscrd  = dsp(sig_cr,    "s", U)
+    syd,   lsyd   = dsp(Fy,        "s", U)
+    Led,   lLed   = dsp(Le_col,    "L", U)
+    Imin_d,lImin  = dsp(I_min,     "I", U)
 
     detail_rows = [
-        ("Effective Length Factor K",    f"{K}"),
-        ("Effective Length  Le = KL",    f"{Led:.3f} {lLed}"),
-        (f"Min. Radius of Gyration  r",  f"{r_min*1e3:.2f} mm"),
-        ("Slenderness Ratio  KL/r",      f"{SR:.2f}"),
-        ("Transition Slenderness  Cc",   f"{Cc:.2f}"),
-        ("Column Regime",                regime),
-        (f"Min. Moment of Inertia  I",   f"{Imin_d:.3f} {lImin}"),
-        ("Euler Critical Load  Pcr,E",   f"{dsp(Pcr_euler,'F',U)[0]:.3f} {lPcrd}"),
-        ("Governing Critical Load  Pcr", f"{Pcrd:.3f} {lPcrd}"),
-        ("Critical Stress  σcr",         f"{scrd:.3f} {lscrd}"),
-        ("Yield Stress  Fy",             f"{syd:.1f} {lsyd}"),
-        ("Applied Load  P",              f"{dsp(P_applied,'F',U)[0]:.3f} {lPcrd}" if P_applied>0 else "—"),
-        ("Factor of Safety",             f"{FOS_col:.3f}" if P_applied>0 else "—"),
-        ("Status",                       col_status),
+        ("Effective Length Factor K",     f"{K}"),
+        ("Effective Length  Le = KL",     f"{Led:.3f} {lLed}"),
+        ("Min. Radius of Gyration  r",    f"{r_min*1e3:.3f} mm"),
+        ("Slenderness Ratio  KL/r",       f"{SR:.2f}"),
+        ("Transition Slenderness  Cc",    f"{Cc:.2f}"),
+        ("Column Regime",                 regime),
+        ("Min. Moment of Inertia  I_min", f"{Imin_d:.3f} {lImin}"),
+        ("Euler Critical Load  Pcr,E",    f"{dsp(Pcr_euler,'F',U)[0]:.4f} {lPcrd}"),
+        ("Governing Pcr  (Johnson/Euler)",f"{dsp(Pcr,'F',U)[0]:.4f} {lPcrd}"),
+        ("Critical Stress  σcr",          f"{scrd:.3f} {lscrd}"),
+        ("Yield Stress  Fy",              f"{syd:.1f} {lsyd}"),
     ]
+
+    if eccentric and ecc > 0:
+        sm_d2, lsm2 = dsp(sig_max_applied, "s", U)
+        Py_d2, lPy2 = dsp(P_yield,         "F", U)
+        dd_d2, ldd2 = dsp(delta_mid_mm*1e-3,"d", U)
+        detail_rows += [
+            ("— Eccentric Loading ——————", ""),
+            ("Eccentricity  e",            f"{ecc_mm:.3f} mm"),
+            ("Eccentricity Ratio  ec/r²",  f"{ecc_ratio:.4f}"),
+            ("Max Stress  σ_max  (secant)",f"{sm_d2:.3f} {lsm2}"),
+            ("Yield Load  Py",             f"{Py_d2:.4f} {lPy2}"),
+            ("Midspan Deflection  δ",      f"{dd_d2:.4f} {ldd2}" if P_applied>0 else "—"),
+        ]
+
+    if P_applied > 0:
+        detail_rows += [
+            ("Applied Load  P",  f"{dsp(P_applied,'F',U)[0]:.4f} {lPcrd}"),
+            ("Factor of Safety", f"{FOS_col:.3f}"),
+            ("Status",           col_status),
+        ]
+
     df_col = pd.DataFrame(detail_rows, columns=["Parameter","Value"])
     st.dataframe(df_col, use_container_width=True, hide_index=True)
 
